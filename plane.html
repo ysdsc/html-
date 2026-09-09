@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>飞机大战 - 修复掉落版</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            background: #000; 
+            overflow: hidden; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh;
+            touch-action: none;
+            font-family: monospace;
+        }
+        canvas { 
+            display: block; 
+            background: #0a0a2a;
+        }
+        #hud {
+            position: fixed;
+            top: 10px; left: 15px;
+            color: #fff;
+            font: bold 14px/1.8 monospace;
+            z-index: 10;
+            text-shadow: 1px 1px 2px #000;
+        }
+        #hud .score { color: #ff0; }
+        #hud .lives { color: #0f0; }
+        #hud .power { color: #0ff; }
+        #bossBar {
+            position: fixed; top: 50px; left: 50%;
+            transform: translateX(-50%);
+            width: 300px; height: 16px;
+            background: rgba(0,0,0,0.7);
+            border: 1px solid #f00; border-radius: 8px;
+            display: none; z-index: 10;
+        }
+        #bossBarFill {
+            height: 100%; background: linear-gradient(90deg, #f00, #ff0);
+            border-radius: 8px; width: 100%; transition: width 0.2s;
+        }
+        #bossBarText {
+            position: absolute; top: -18px; left: 0;
+            color: #f00; font: bold 13px monospace; text-shadow: 0 0 4px #f00;
+        }
+        .overlay {
+            position: fixed; top: 0; left: 0;
+            width: 100%; height: 100%;
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center;
+            z-index: 30;
+        }
+        #startScreen { background: rgba(0,0,0,0.85); color: #fff; }
+        #gameOver, #victory { background: rgba(0,0,0,0.8); color: #fff; display: none; }
+        .btn {
+            margin-top: 20px; padding: 12px 32px;
+            font: bold 18px monospace; background: #ff0; color: #000;
+            border: none; border-radius: 8px; cursor: pointer;
+        }
+        .btn:active { background: #cc0; }
+        #leaderboard { margin-top: 15px; font: 14px monospace; color: #aaa; text-align: center; }
+        #tip {
+            position: fixed; bottom: 10px;
+            color: rgba(255,255,255,0.4); font: 12px monospace;
+            text-align: center; width: 100%; z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="game"></canvas>
+    <div id="hud">
+        <div class="score">分数: <span id="scoreVal">0</span></div>
+        <div class="lives">生命: <span id="livesVal">♥♥♥</span></div>
+        <div class="power">火力: Lv.<span id="powerVal">1</span> | 💣<span id="bombVal">0</span></div>
+    </div>
+    <div id="bossBar">
+        <div id="bossBarText">👹 BOSS 1/3</div>
+        <div id="bossBarFill"></div>
+    </div>
+    <div id="tip">电脑: 方向键/WASD | 手机: 触摸滑动 | 空格: 炸弹</div>
+
+    <div id="startScreen" class="overlay">
+        <div style="font-size:32px; color:#ff0;">✈️ 飞机大战</div>
+        <div style="margin-top:10px; font-size:14px; color:#aaa;">击毁敌机攒分，3000分挑战BOSS！通关3个BOSS获胜！</div>
+        <button class="btn" onclick="startGame()">开始游戏</button>
+        <div id="leaderboard"></div>
+    </div>
+    <div id="gameOver" class="overlay">
+        <div style="font-size:28px;">💥 游戏结束</div>
+        <div style="font-size:18px; margin-top:10px;">得分: <span id="finalScore">0</span></div>
+        <div id="newRecord" style="color:#ff0; display:none; margin-top:5px;">🏆 新纪录！</div>
+        <button class="btn" onclick="restart()">再来一局</button>
+    </div>
+    <div id="victory" class="overlay">
+        <div style="font-size:28px; color:#ff0;">🎉 通关胜利！</div>
+        <div style="font-size:18px; margin-top:10px;">最终得分: <span id="vicScore">0</span></div>
+        <button class="btn" onclick="restart()">再来一局</button>
+    </div>
+
+    <script>
+    // 懒初始化 AudioContext：等用户首次点击/手势时再创建，避免浏览器策略导致脚本报错中断
+    let audioCtx = null;
+    function getAudio() {
+        if (!audioCtx) {
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            } catch (e) { audioCtx = null; }
+        }
+        return audioCtx;
+    }
+    function playSound(type) {
+        const ac = getAudio();
+        if (!ac) return; // 音频不可用时静默跳过，不影响游戏
+        if (ac.state === 'suspended') ac.resume();
+        const osc = ac.createOscillator();
+        const gain = ac.createGain();
+        osc.connect(gain); gain.connect(ac.destination);
+        const now = ac.currentTime;
+        if (type === 'shoot') {
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(800, now);
+            osc.frequency.exponentialRampToValueAtTime(200, now + 0.08);
+            gain.gain.setValueAtTime(0.15, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+            osc.start(now); osc.stop(now + 0.08);
+        } else if (type === 'explosion') {
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(150, now);
+            osc.frequency.exponentialRampToValueAtTime(30, now + 0.3);
+            gain.gain.setValueAtTime(0.3, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+            osc.start(now); osc.stop(now + 0.3);
+        } else if (type === 'powerup') {
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(400, now);
+            osc.frequency.linearRampToValueAtTime(800, now + 0.2);
+            gain.gain.setValueAtTime(0.2, now);
+            gain.gain.linearRampToValueAtTime(0.01, now + 0.2);
+            osc.start(now); osc.stop(now + 0.2);
+        } else if (type === 'bossAlert') {
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(200, now);
+            osc.frequency.linearRampToValueAtTime(100, now + 0.5);
+            gain.gain.setValueAtTime(0.3, now);
+            gain.gain.linearRampToValueAtTime(0.01, now + 0.5);
+            osc.start(now); osc.stop(now + 0.5);
+        }
+    }
+
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    function resize() {
+        canvas.width = Math.min(window.innerWidth, 480);
+        canvas.height = Math.min(window.innerHeight, 720);
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    const BOSS_SCORE = 3000;
+    const MAX_POWER = 10;       // 火力上限 Lv10
+    const SHOT_COUNT_CAP = 5;   // Lv5 后弹道数量封顶，不再增加
+    // 射速：cooldown 越小越快。初始(基础)射速降低 → baseShootCooldown 调大
+    const BASE_COOLDOWN = 16;   // 初始攻击速度（更慢）
+    const MIN_COOLDOWN = 4;     // 最高火力时的最快射速
+    let score = 0, lives = 3, running = false;
+    let bossActive = false, bossDefeatedCount = 0;
+    let keys = {}, touchX = null;
+    let powerLevel = 1, shield = false, bombs = 0, invincible = 0;
+
+    // 当前一次发射的弹道数量：Lv1~Lv5 从1渐增到5，之后保持5
+    function shotCount() {
+        return Math.min(powerLevel, SHOT_COUNT_CAP);
+    }
+    // 当前射击冷却（射速）：Lv5 之后每升一级冷却减少，越打越快
+    function shootCooldown() {
+        if (powerLevel <= SHOT_COUNT_CAP) return BASE_COOLDOWN;
+        // Lv6~Lv10：从 BASE_COOLDOWN 线性降到 MIN_COOLDOWN
+        const t = (powerLevel - SHOT_COUNT_CAP) / (MAX_POWER - SHOT_COUNT_CAP); // 0~1
+        return BASE_COOLDOWN - t * (BASE_COOLDOWN - MIN_COOLDOWN);
+    }
+
+    const player = { x: 0, y: 0, w: 36, h: 44, speed: 5, cooldown: 0 };
+    let bullets = [], enemyBullets = [], enemies = [], explosions = [], items = [], effects = [];
+    let stars = Array.from({length: 60}, () => ({
+        x: Math.random() * 500, y: Math.random() * 800,
+        s: Math.random() * 2 + 0.5, speed: Math.random() * 2 + 0.5
+    }));
+    let boss = null;
+
+    document.addEventListener('keydown', e => { keys[e.key] = true; if (e.key === ' ' && running) useBomb(); });
+    document.addEventListener('keyup', e => keys[e.key] = false);
+    canvas.addEventListener('touchstart', e => { e.preventDefault(); touchX = e.touches[0].clientX; }, {passive: false});
+    canvas.addEventListener('touchmove', e => { e.preventDefault(); touchX = e.touches[0].clientX; }, {passive: false});
+    canvas.addEventListener('touchend', e => { e.preventDefault(); touchX = null; }, {passive: false});
+
+    function initGame() {
+        score = 0; lives = 3; bossActive = false; bossDefeatedCount = 0;
+        powerLevel = 1; shield = false; bombs = 0; invincible = 0;
+        bullets = []; enemyBullets = []; enemies = []; explosions = []; items = []; effects = [];
+        boss = null;
+        player.x = canvas.width / 2; player.y = canvas.height - 70; player.cooldown = 0;
+        document.getElementById('bossBar').style.display = 'none';
+        updateHUD();
+    }
+
+    function startGame() {
+        document.getElementById('startScreen').style.display = 'none';
+        initGame(); running = true; playSound('shoot');
+    }
+    function restart() {
+        document.getElementById('gameOver').style.display = 'none';
+        document.getElementById('victory').style.display = 'none';
+        initGame(); running = true; playSound('shoot');
+    }
+
+    function shoot() {
+        const cx = player.x, cy = player.y - 22;
+        const count = shotCount(); // Lv1~Lv5: 1~5；Lv5后恒为5
+        if (count === 1) {
+            bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 12, speed: 8 });
+        } else if (count === 2) {
+            bullets.push({ x: cx - 8, y: cy + 5, w: 3, h: 12, speed: 8 });
+            bullets.push({ x: cx + 8, y: cy + 5, w: 3, h: 12, speed: 8 });
+        } else if (count === 3) {
+            bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 12, speed: 8 });
+            bullets.push({ x: cx - 10, y: cy + 5, w: 3, h: 12, speed: 8 });
+            bullets.push({ x: cx + 10, y: cy + 5, w: 3, h: 12, speed: 8 });
+        } else {
+            // 扇形弹幕（5 发），Lv5 后数量不再增加
+            for (let i = 0; i < count; i++) {
+                const angle = -Math.PI/2 + (i - (count - 1) / 2) * 0.15;
+                bullets.pus

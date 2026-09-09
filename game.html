@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>躲避障碍物 - 触屏小游戏</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #0a0a2a;
+    touch-action: none;
+    font-family: Arial, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+  #gameCanvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    background: #0a0a2a;
+  }
+  .overlay {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: rgba(0,0,0,0.8);
+    z-index: 10;
+    color: #fff;
+    padding: 20px;
+  }
+  #gameOverScreen { display: none; }
+  .title {
+    font-size: 34px;
+    font-weight: bold;
+    margin-bottom: 18px;
+    color: #ffdd57;
+    text-align: center;
+  }
+  .subtitle {
+    font-size: 15px;
+    color: #ccc;
+    margin-bottom: 36px;
+    text-align: center;
+    line-height: 2;
+  }
+  .btn {
+    padding: 14px 50px;
+    font-size: 20px;
+    border: none;
+    border-radius: 50px;
+    background: #ee5a24;
+    color: #fff;
+    cursor: pointer;
+  }
+  .btn:active { opacity: 0.8; }
+  .score-display {
+    font-size: 18px;
+    color: #fff;
+    margin-bottom: 10px;
+  }
+  .final-score {
+    font-size: 54px;
+    color: #ffdd57;
+    font-weight: bold;
+    margin: 8px 0 28px;
+  }
+  .hint {
+    font-size: 12px;
+    color: #777;
+    margin-top: 18px;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<div class="overlay" id="startScreen">
+  <div class="title">躲避障碍物</div>
+  <div class="subtitle">
+    手指左右滑动控制小球<br>
+    躲避从天而降的障碍物<br>
+    坚持越久分数越高
+  </div>
+  <button class="btn" onclick="startGame()">开始游戏</button>
+  <div class="hint">支持触屏 / 鼠标</div>
+</div>
+
+<div class="overlay" id="gameOverScreen">
+  <div class="title">游戏结束</div>
+  <div class="score-display">最终得分</div>
+  <div class="final-score" id="finalScore">0</div>
+  <button class="btn" onclick="startGame()">再来一次</button>
+</div>
+
+<script>
+var canvas = document.getElementById('gameCanvas');
+var ctx = canvas.getContext('2d');
+
+// ---------- 屏幕适配 ----------
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ---------- 兼容 roundRect ----------
+function drawRoundRect(x, y, w, h, r) {
+  if (typeof ctx.roundRect === 'function') {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+  } else {
+    // 手动绘制圆角矩形
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+}
+
+// ---------- 游戏状态 ----------
+var player = null;
+var obstacles = [];
+var particles = [];
+var score = 0;
+var gameRunning = false;
+var speed = 3;
+var spawnRate = 60;
+var frames = 0;
+var animId = null;
+
+function initGame() {
+  player = {
+    x: canvas.width / 2,
+    y: canvas.height - 120,
+    radius: 18,
+    color: '#00d2ff',
+    trail: []
+  };
+  obstacles = [];
+  particles = [];
+  score = 0;
+  speed = 3;
+  spawnRate = 60;
+  frames = 0;
+  gameRunning = true;
+}
+
+function spawnObstacle() {
+  var w = 30 + Math.random() * 60;
+  var h = 12 + Math.random() * 18;
+  var x = Math.random() * (canvas.width - w - 20) + 10;
+  var colors = ['#ff6b6b', '#ff9f43', '#ee5a24', '#f78fb3', '#cf6a87'];
+  obstacles.push({
+    x: x, y: -h,
+    w: w, h: h,
+    speed: speed + Math.random() * 2,
+    color: colors[Math.floor(Math.random() * colors.length)]
+  });
+}
+
+function createParticles(x, y, color) {
+  for (var i = 0; i < 20; i++) {
+    particles.push({
+      x: x, y: y,
+      vx: (Math.random() - 0.5) * 8,
+      vy: (Math.random() - 0.5) * 8,
+      radius: Math.random() * 4 + 2,
+      color: color,
+      life: 30 + Math.random() * 20,
+      maxLife: 50
+    });
+  }
+}
+
+function drawBackground() {
+  // 用纯色 + 简单星星，避免渐变兼容问题
+  ctx.fillStyle = '#0a0a2a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (var i = 0; i < 40; i++) {
+    var sx = (i * 173) % canvas.width;
+    var sy = (i * 97 + frames * 0.5) % canvas.height;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 1, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.fill();
+  }
+}
+
+function drawPlayer() {
+  if (!player) return;
+
+  // 拖尾
+  for (var i = 0; i < player.trail.length; i++) {
+    var t = player.trail[i];
+    var a = (i / player.trail.length) * 0.25;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, player.radius * (i / player.trail.length), 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,210,255,' + a + ')';
+    ctx.fill();
+  }
+
+  // 主体
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+  ctx.fillStyle = player.color;
+  ctx.fill();
+}
+
+function drawObstacle(obs) {
+  ctx.fillStyle = obs.color;
+  drawRoundRect(obs.x, obs.y, obs.w, obs.h, 4);
+  ctx.fill();
+}
+
+function drawParticles() {
+  for (var i = 0; i < particles.length; i++) {
+    var p = particles[i];
+    var a = p.life / p.maxLife;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius * a, 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = a;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawHUD() {
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 20px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText('Score: ' + score, 16, 36);
+
+  var level = Math.floor(score / 20) + 1;
+  ctx.fillStyle = '#ffdd57';
+  ctx.font = '14px Arial';
+  ctx.fillText('Lv ' + level, 16, 58);
+}
+
+function checkCollision() {
+  for (var i = 0; i < obstacles.length; i++) {
+    var obs = obstacles[i];
+    var cx = Math.max(obs.x, Math.min(player.x, obs.x + obs.w));
+    var cy = Math.max(obs.y, Math.min(player.y, obs.y + obs.h));
+    var dx = player.x - cx;
+    var dy = player.y - cy;
+    if (dx * dx + dy * dy < player.radius * player.radius) return true;
+  }
+  return false;
+}
+
+function update() {
+  if (!gameRunning) return;
+
+  frames++;
+  score = Math.floor(frames / 10);
+
+  speed = 3 + Math.floor(score / 15) * 0.8;
+  spawnRate = Math.max(20, 60 - Math.floor(score / 5) * 3);
+
+  // 拖尾
+  player.trail.push({ x: player.x, y: player.y });
+  if (player.trail.length > 12) player.trail.shift();
+
+  // 生成
+  if (frames % spawnRate === 0) spawnObstacle();
+
+  // 障碍物移动
+  for (var i = 0; i < obstacles.length; i++) {
+    obstacles[i].y += obstacles[i].speed;
+  }
+  obstacles = obstacles.filter(function(o) { return o.y < canvas.height + 50; });
+
+  // 粒子
+  for (var j = 0; j < particles.length; j++) {
+    particles[j].x += particles[j].vx;
+    particles[j].y += particles[j].vy;
+    particles[j].vx *= 0.96;
+    particles[j].vy *= 0.96;
+    particles[j].life--;
+  }
+  particles = particles.filter(function(p) { return p.life > 0; });
+
+  // 碰撞
+  if (checkCollision()) {
+    createParticles(player.x, player.y, player.color);
+    gameRunning = false;
+    setTimeout(function() {
+      document.getElementById('finalScore').textContent = score;
+      document.getElementById('gameOverScreen').style.display = 'flex';
+    }, 600);
+  }
+}
+
+function draw() {
+  drawBackground();
+  if (obstacles) obstacles.forEach(drawObstacle);
+  if (particles) drawParticles();
+  if (gameRunning && player) drawPlayer();
+  if (gameRunning) drawHUD();
+}
+
+function gameLoop() {
+  update();
+  draw();
+  animId = requestAnimationFrame(gameLoop);
+}
+
+function startGame() {
+  document.getElementById('startScreen').style.display = 'none';
+  document.getElementById('gameOverScreen').style.display = 'none';
+  initGame();
+}
+
+// ---------- 触屏控制 ----------
+var touchX = null;
+canvas.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  touchX = e.touches[0].clientX;
+}, { passive: false });
+
+canvas.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  if (touchX === null || !player) return;
+  var dx = e.touches[0].clientX - touchX;
+  player.x += dx * 1.5;
+  if (player.x < player.radius) player.x = player.radius;
+  if (player.x > canvas.width - player.radius) player.x = canvas.width - player.radius;
+  touchX = e.touches[0].clientX;
+}, { passive: false });
+
+canvas.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  touchX = null;
+}, { passive: false });
+
+// ---------- 鼠标控制 ----------
+var mouseX = null;
+canvas.addEventListener('mousedown', function(e) { mouseX = e.clientX; });
+canvas.addEventListener('mousemove', function(e) {
+  if (mouseX === null || !player) return;
+  var dx = e.clientX - mouseX;
+  player.x += dx * 1.5;
+  if (player.x < player.radius) player.x = player.radius;
+  if (player.x > canvas.width - player.radius) player.x = canvas.width - player.radius;
+  mouseX = e.clientX;
+});
+canvas.addEventListener('mouseup', function() { mouseX = null; });
+canvas.addEventListener('mouseleave', function() { mouseX = null; });
+
+// ---------- 启动 ----------
+// 先画一帧背景，避免初始黑屏
+drawBackground();
+gameLoop();
+</script>
+</body>
+</html>
