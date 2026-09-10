@@ -48,7 +48,7 @@ canvas{display:block;background:#0a0a2a}
 </div>
 <button id="bombBtn" class="bomb-btn"><span id="bombIcon">💣</span><span id="bombCount">0</span></button>
 <div id="bossBar"><div id="bossBarText">👹 BOSS 1/3</div><div id="bossBarFill"></div></div>
-<div id="tip">电脑: 方向键/WASD + 空格炸弹 | 手机: 触摸滑动 + 点💣放炸弹</div>
+<div id="tip">电脑: 方向键/WASD(上下左右) + 空格炸弹 | 手机: 触摸拖动移动(上下左右) + 点💣放炸弹</div>
 
 <div id="startScreen" class="overlay">
 <div style="font-size:32px;color:#ff0">✈️ 飞机大战</div>
@@ -144,7 +144,10 @@ window.addEventListener('resize', resize);
 // ---- 游戏状态 ----
 var score = 0, lives = MAX_LIVES, running = false;
 var bossActive = false, bossDefeatedCount = 0;
-var keys = {}, touchX = null;
+var keys = {};
+// 🎮 触摸（手机）：相对拖动，支持上下左右全方向移动
+var touchActive = false, touchPrevX = null, touchPrevY = null;
+var touchDX = 0, touchDY = 0;
 var powerLevel = 1, shield = false, bombs = 0, invincible = 0;
 var bombCooldown = 0;          // 💣 炸弹使用冷却（帧数，5秒 = 300帧@60fps）
 var BOMB_COOLDOWN_FRAMES = 300; // 5 秒冷却时长
@@ -157,10 +160,26 @@ var boss = null;
 // ---- 输入 ----
 document.addEventListener('keydown', function(e) { keys[e.key] = true; if (e.key === ' ' && running) useBomb(); });
 document.addEventListener('keyup', function(e) { keys[e.key] = false; });
-function touchHandler(e) { e.preventDefault(); touchX = e.touches[0].clientX; }
-canvas.addEventListener('touchstart', touchHandler, { passive: false });
-canvas.addEventListener('touchmove', touchHandler, { passive: false });
-canvas.addEventListener('touchend', function(e) { e.preventDefault(); touchX = null; }, { passive: false });
+// 🎮 相对拖动：手指移动量累加到 touchDX/touchDY，update 里应用到玩家（支持上下左右）
+function onTouchStart(e) {
+    e.preventDefault();
+    var t = e.touches[0];
+    touchActive = true; touchPrevX = t.clientX; touchPrevY = t.clientY;
+}
+function onTouchMove(e) {
+    e.preventDefault();
+    if (!touchActive || touchPrevX === null) return;
+    var t = e.touches[0];
+    var sx = canvas.width / window.innerWidth, sy = canvas.height / window.innerHeight;
+    touchDX += (t.clientX - touchPrevX) * sx;
+    touchDY += (t.clientY - touchPrevY) * sy;
+    touchPrevX = t.clientX; touchPrevY = t.clientY;
+}
+function onTouchEnd(e) { e.preventDefault(); touchActive = false; touchPrevX = null; touchPrevY = null; }
+canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
 
 // ---- 核心函数（全局，确保 onclick/监听器都能找到） ----
 function initGame() {
@@ -193,15 +212,38 @@ function setDisplay(id, val) { var el = document.getElementById(id); if (el) el.
 function setText(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; }
 
 function shoot() {
+    // 弹道规则：
+    //   Lv1~Lv3 —— 集中在中间，竖直向上
+    //   Lv4      —— 两边扇形发射（左右各 2 根，向两侧展开）
+    //   Lv5~Lv10 —— 中间竖直 + 两边扇形（左右各 2 根，共 5 根）
     var cx = player.x, cy = player.y - 22;
-    if (powerLevel === 1) bullets.push({ x: cx-1.5, y: cy, w: 3, h: 12, speed: 8 });
-    else if (powerLevel === 2) { bullets.push({ x: cx-8, y: cy+5, w: 3, h: 12, speed: 8 }); bullets.push({ x: cx+8, y: cy+5, w: 3, h: 12, speed: 8 }); }
-    else if (powerLevel === 3) { bullets.push({ x: cx-1.5, y: cy, w: 3, h: 12, speed: 8 }); bullets.push({ x: cx-10, y: cy+5, w: 3, h: 12, speed: 8 }); bullets.push({ x: cx+10, y: cy+5, w: 3, h: 12, speed: 8 }); }
-    else {
-        var n = Math.min(powerLevel, 5);
+    var sp = 8; // 子弹速度标量
+
+    if (powerLevel <= 3) {
+        // 集中在中间，全部竖直向上
+        var n = powerLevel; // 1/2/3
+        var spacing = 6;
+        var startX = cx - (n - 1) * spacing / 2;
         for (var i = 0; i < n; i++) {
-            var angle = -Math.PI/2 + (i - (n-1)/2) * 0.15;
-            bullets.push({ x: cx, y: cy, w: 3, h: 10, speed: 8, vx: Math.cos(angle)*8, vy: Math.sin(angle)*8 });
+            var bx = startX + i * spacing;
+            bullets.push({ x: bx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: 0, vy: -sp });
+        }
+    } else if (powerLevel === 4) {
+        // 两边扇形发射：左右各 2 根（散射收敛到约 ±9°，总张角约 18°）
+        var offs4 = [-2, -1, 1, 2]; // 相对 -90° 的偏移档位
+        var spread = 0.078;
+        for (var j = 0; j < offs4.length; j++) {
+            var aj = -Math.PI/2 + offs4[j] * spread;
+            bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: Math.cos(aj)*sp, vy: Math.sin(aj)*sp });
+        }
+    } else {
+        // Lv5~Lv10：中间 1 根竖直 + 左右各 2 根扇形（共 5 根）
+        bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: 0, vy: -sp }); // 正中
+        var offs5 = [-2, -1, 1, 2];
+        var spread5 = 0.078;
+        for (var k = 0; k < offs5.length; k++) {
+            var ak = -Math.PI/2 + offs5[k] * spread5;
+            bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: Math.cos(ak)*sp, vy: Math.sin(ak)*sp });
         }
     }
     playSound('shoot');
@@ -479,17 +521,18 @@ function update() {
     if (keys['ArrowRight']||keys['d']||keys['D']) player.x += player.speed;
     if (keys['ArrowUp']||keys['w']||keys['W']) player.y -= player.speed;
     if (keys['ArrowDown']||keys['s']||keys['S']) player.y += player.speed;
-    if (touchX !== null) { var tx = touchX * (canvas.width/window.innerWidth), dx = tx - player.x; player.x += (dx>0?1:-1)*Math.min(Math.abs(dx), player.speed*2); }
+    // 🎮 触摸拖动（相对位移，支持上下左右全方向移动）
+    if (touchActive) { player.x += touchDX; player.y += touchDY; touchDX = 0; touchDY = 0; }
     player.x = Math.max(20, Math.min(canvas.width-20, player.x));
     player.y = Math.max(40, Math.min(canvas.height-30, player.y));
     if (invincible > 0) invincible--;
     if (bombCooldown > 0) { bombCooldown--; updateBombButton(); } // 💣 炸弹冷却倒计时
 
-    var cd = powerLevel <= 5 ? 16 : Math.max(4, 16 - (powerLevel-5)*2.4);
+    var cd = powerLevel <= 5 ? 16 : Math.max(12, 16 - (powerLevel-5)*1.0);
     if (player.cooldown <= 0) { shoot(); player.cooldown = cd; }
     player.cooldown--;
 
-    bullets.forEach(function(b) { b.x += b.vx || 0; b.y -= b.speed; });
+    bullets.forEach(function(b) { b.x += b.vx || 0; b.y += b.vy || -b.speed; });
     bullets = bullets.filter(function(b) { return b.y > -15 && b.x > -10 && b.x < canvas.width+10; });
 
     if (!bossActive && score >= BOSS_SCORE*(bossDefeatedCount+1) && bossDefeatedCount < 3) spawnBoss();
@@ -615,26 +658,145 @@ function update() {
 
 function drawPlayer() {
     if (invincible > 0 && Math.floor(invincible/3)%2 === 0) return;
+    var pl = powerLevel; // 当前火力等级，决定战机外观进化程度
     ctx.save(); ctx.translate(player.x, player.y);
-    if (shield) { ctx.strokeStyle = '#0ff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0,0,32,0,Math.PI*2); ctx.stroke(); }
-    // 机身渐变
+    if (shield) { ctx.strokeStyle = '#0ff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0,0,34,0,Math.PI*2); ctx.stroke(); }
+
+    // ===== Lv10：彩色环绕光环 —— 垫在最底层（不遮挡机身/机翼），圆心严格居中 (0,0) =====
+    if (pl >= 10) {
+        var ot = Date.now() / 1000;
+        var baseHue = (ot * 90) % 360;       // 色相持续循环 → "变成彩色"
+        var orbR = 38;                        // 略大于机身，形成环绕效果
+        ctx.save();
+        ctx.rotate(ot * 1.6);                 // 整体缓缓旋转
+        var og = ctx.createLinearGradient(-orbR, 0, orbR, 0);
+        og.addColorStop(0,   'hsl(' + baseHue + ',100%,62%)');
+        og.addColorStop(0.5, 'hsl(' + ((baseHue + 60) % 360) + ',100%,72%)');
+        og.addColorStop(1,   'hsl(' + ((baseHue + 120) % 360) + ',100%,62%)');
+        ctx.strokeStyle = og;
+        ctx.lineWidth = 3;
+        ctx.setLineDash([12, 7]);             // 虚线分段，流动更明显
+        ctx.lineDashOffset = -ot * 50;        // 沿环流动 → "环绕"
+        ctx.beginPath(); ctx.arc(0, 0, orbR, 0, Math.PI * 2); ctx.stroke();
+        // 内层反向细环，增强彩色流转感
+        ctx.setLineDash([6, 8]);
+        ctx.lineDashOffset = ot * 40;
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'hsla(' + ((baseHue + 180) % 360) + ',100%,75%,0.8)';
+        ctx.beginPath(); ctx.arc(0, 0, orbR - 9, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+    }
+
+    // ===== 基础机身（所有等级共有）=====
     var bodyGrad = ctx.createLinearGradient(0,-22,0,24);
     bodyGrad.addColorStop(0,'#5cf'); bodyGrad.addColorStop(1,'#058');
     ctx.fillStyle = bodyGrad;
     ctx.beginPath(); ctx.moveTo(0,-22); ctx.lineTo(-16,10); ctx.lineTo(-9,14); ctx.lineTo(-9,24); ctx.lineTo(9,24); ctx.lineTo(9,14); ctx.lineTo(16,10); ctx.closePath(); ctx.fill();
-    // 主翼
-    ctx.fillStyle = '#047';
-    ctx.beginPath(); ctx.moveTo(-16,8); ctx.lineTo(-28,16); ctx.lineTo(-15,18); ctx.closePath(); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(16,8); ctx.lineTo(28,16); ctx.lineTo(15,18); ctx.closePath(); ctx.fill();
-    // 驾驶舱
+
+    // ===== Lv2+：加长主翼 =====
+    var wingColor = pl >= 7 ? '#058' : '#07c';  // 加亮：原为深暗蓝(#024/#047)，现改为饱和亮蓝，不再发灰透明
+    ctx.fillStyle = wingColor;
+    if (pl >= 2) {
+        ctx.beginPath(); ctx.moveTo(-16,8); ctx.lineTo(-30,15); ctx.lineTo(-15,19); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(16,8); ctx.lineTo(30,15); ctx.lineTo(15,19); ctx.closePath(); ctx.fill();
+    } else {
+        ctx.beginPath(); ctx.moveTo(-16,8); ctx.lineTo(-28,16); ctx.lineTo(-15,18); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(16,8); ctx.lineTo(28,16); ctx.lineTo(15,18); ctx.closePath(); ctx.fill();
+    }
+
+    // ===== Lv3+：机首双炮管 =====
+    if (pl >= 3) {
+        ctx.fillStyle = '#9cf';
+        ctx.fillRect(-6, -24, 3, 6);
+        ctx.fillRect(3, -24, 3, 6);
+    }
+
+    // ===== Lv4+：尾部稳定翼 =====
+    if (pl >= 4) {
+        ctx.fillStyle = wingColor;
+        ctx.beginPath(); ctx.moveTo(-9,18); ctx.lineTo(-14,26); ctx.lineTo(-6,24); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(9,18); ctx.lineTo(14,26); ctx.lineTo(6,24); ctx.closePath(); ctx.fill();
+    }
+
+    // ===== Lv5+：第二层下翼（双翼构型）=====
+    if (pl >= 5) {
+        ctx.fillStyle = '#07c';  // 加亮：原为暗青(#035)
+        ctx.beginPath(); ctx.moveTo(-14,16); ctx.lineTo(-22,22); ctx.lineTo(-10,22); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(14,16); ctx.lineTo(22,22); ctx.lineTo(10,22); ctx.closePath(); ctx.fill();
+    }
+
+    // ===== 驾驶舱（高等级更明亮）=====
     var cockGrad = ctx.createLinearGradient(0,-8,0,6);
-    cockGrad.addColorStop(0,'#dff'); cockGrad.addColorStop(1,'#0af');
+    cockGrad.addColorStop(0, pl >= 8 ? '#ffffff' : '#dff');
+    cockGrad.addColorStop(1, pl >= 6 ? '#5df' : '#0af');
     ctx.fillStyle = cockGrad; ctx.beginPath(); ctx.ellipse(0,-4,5,9,0,0,Math.PI*2); ctx.fill();
-    // 引擎喷焰
-    var thrust = 22 + Math.random()*14;
+
+    // ===== Lv6+：翼尖发光 =====
+    if (pl >= 6) {
+        ctx.fillStyle = '#0ff';
+        ctx.beginPath(); ctx.arc(-30,15,2.5,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(30,15,2.5,0,Math.PI*2); ctx.fill();
+    }
+
+    // ===== Lv7+：背部装甲脊 =====
+    if (pl >= 7) {
+        ctx.fillStyle = '#035';
+        ctx.beginPath(); ctx.moveTo(-4,-22); ctx.lineTo(0,-30); ctx.lineTo(4,-22); ctx.closePath(); ctx.fill();
+    }
+
+    // ===== Lv8+：肩部能量炮 =====
+    if (pl >= 8) {
+        ctx.fillStyle = '#fa0';
+        ctx.fillRect(-18, 4, 5, 10);
+        ctx.fillRect(13, 4, 5, 10);
+        ctx.fillStyle = '#ff0';
+        ctx.beginPath(); ctx.arc(-15.5,4,2.5,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(15.5,4,2.5,0,Math.PI*2); ctx.fill();
+    }
+
+    // ===== Lv9+：全身发光描边 =====
+    if (pl >= 9) {
+        ctx.strokeStyle = 'rgba(120,220,255,0.9)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(0,-22); ctx.lineTo(-16,10); ctx.lineTo(-9,14); ctx.lineTo(-9,24); ctx.lineTo(9,24); ctx.lineTo(9,14); ctx.lineTo(16,10); ctx.closePath(); ctx.stroke();
+    }
+
+    // ===== 引擎喷焰（等级越高越亮越大）=====
+    var thrust = 22 + Math.random()*14 + (pl - 1) * 2;
     var tg = ctx.createRadialGradient(0,26,0,0,thrust,10);
-    tg.addColorStop(0,'rgba(255,230,90,0.95)'); tg.addColorStop(1,'rgba(255,80,0,0)');
+    if (pl >= 8)      { tg.addColorStop(0,'rgba(180,240,255,0.95)'); tg.addColorStop(1,'rgba(0,120,255,0)'); }
+    else if (pl >= 5) { tg.addColorStop(0,'rgba(255,240,150,0.95)'); tg.addColorStop(1,'rgba(255,120,0,0)'); }
+    else              { tg.addColorStop(0,'rgba(255,230,90,0.95)');  tg.addColorStop(1,'rgba(255,80,0,0)'); }
     ctx.fillStyle = tg; ctx.beginPath(); ctx.ellipse(0,26,6,thrust*0.6,0,0,Math.PI*2); ctx.fill();
+
+    // ===== Lv10：双引擎喷口 =====
+    if (pl >= 10) {
+        var tg2 = ctx.createRadialGradient(-9,24,0,0,thrust*0.7,8);
+        tg2.addColorStop(0,'rgba(180,240,255,0.9)'); tg2.addColorStop(1,'rgba(0,120,255,0)');
+        ctx.fillStyle = tg2; ctx.beginPath(); ctx.ellipse(-9,24,4,thrust*0.5,0,0,Math.PI*2); ctx.fill();
+        var tg3 = ctx.createRadialGradient(9,24,0,0,thrust*0.7,8);
+        tg3.addColorStop(0,'rgba(180,240,255,0.9)'); tg3.addColorStop(1,'rgba(0,120,255,0)');
+        ctx.fillStyle = tg3; ctx.beginPath(); ctx.ellipse(9,24,4,thrust*0.5,0,0,Math.PI*2); ctx.fill();
+    }
+
+    ctx.restore();
+}
+
+// ===== 玩家子弹：简洁发光胶囊（无闪光芒刺） =====
+function drawBullet(b) {
+    ctx.save();
+    ctx.translate(b.x + b.w / 2, b.y + b.h / 2);
+    // 柔和光晕
+    var g = ctx.createRadialGradient(0, 0, 0, 0, 0, 9);
+    g.addColorStop(0, 'rgba(255,240,150,0.55)');
+    g.addColorStop(1, 'rgba(255,200,0,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI * 2); ctx.fill();
+    // 实体弹体（竖直胶囊）
+    ctx.fillStyle = '#ffe066';
+    ctx.beginPath(); ctx.ellipse(0, 0, b.w * 0.6, b.h / 2, 0, 0, Math.PI * 2); ctx.fill();
+    // 高光芯
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.ellipse(0, -b.h * 0.15, b.w * 0.35, b.h * 0.28, 0, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
 }
 
@@ -809,7 +971,7 @@ function draw() {
 
     items.forEach(drawItem);
     drawPlayer();
-    ctx.fillStyle = '#ff0'; bullets.forEach(function(b) { ctx.fillRect(b.x, b.y, b.w, b.h); });
+    bullets.forEach(drawBullet);
     enemyBullets.forEach(function(b) { ctx.fillStyle = b.laser?'#fff':(b.homing?'#fa0':'#f0f'); ctx.fillRect(b.x, b.y, b.w, b.h); });
     enemies.forEach(drawEnemy);
     drawBoss();
@@ -855,4 +1017,3 @@ loop();
 </script>
 </body>
 </html>
-
