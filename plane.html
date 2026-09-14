@@ -32,6 +32,20 @@ canvas{display:block;background:#0a0a2a}
 .bomb-btn.disabled:active{background:rgba(90,0,0,.75);transform:none}
 .bomb-btn span{font-size:18px;color:#ff5252}
 #bombIcon{font-size:20px}
+/* 🌀🔴 主动技能按钮（手机） */
+.skill-btn{position:fixed;z-index:32;width:60px;height:60px;border-radius:50%;border:2px solid;color:#fff;font:bold 11px monospace;text-align:center;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.1;user-select:none;-webkit-tap-highlight-color:transparent}
+.skill-btn:active{transform:scale(.92)}
+.skill-btn.disabled{opacity:.4;filter:grayscale(.85);cursor:not-allowed}
+.skill-btn.disabled:active{transform:none}
+.skill-btn .ic{font-size:22px;line-height:1}
+.skill-btn .cd{font-size:10px;margin-top:1px}
+#spinBtn{left:16px;bottom:54px;border-color:#0cf;background:rgba(0,40,70,.75);box-shadow:0 0 14px rgba(0,180,255,.5)}
+#spinBtn:active{background:rgba(0,120,200,.95)}
+#laserBtn{right:16px;bottom:124px;border-color:#f33;background:rgba(70,0,0,.75);box-shadow:0 0 14px rgba(255,60,60,.5)}
+#laserBtn:active{background:rgba(160,0,0,.95)}
+/* 💬 提示气泡 */
+#toast{position:fixed;top:92px;left:50%;transform:translateX(-50%);z-index:45;color:#ff0;font:bold 15px monospace;text-shadow:0 0 6px #f90;opacity:0;transition:opacity .25s;pointer-events:none;white-space:nowrap}
+#toast.show{opacity:1}
 </style>
 </head>
 <body>
@@ -47,8 +61,11 @@ canvas{display:block;background:#0a0a2a}
 <div class="power">火力: Lv.<span id="powerVal">1</span> | 💣<span id="bombVal">0</span></div>
 </div>
 <button id="bombBtn" class="bomb-btn"><span id="bombIcon">💣</span><span id="bombCount">0</span></button>
+<button id="spinBtn" class="skill-btn"><span class="ic">🌀</span><span class="cd">Lv5</span></button>
+<button id="laserBtn" class="skill-btn"><span class="ic">🔴</span><span class="cd">Lv10</span></button>
 <div id="bossBar"><div id="bossBarText">👹 BOSS 1/3</div><div id="bossBarFill"></div></div>
-<div id="tip">电脑: 方向键/WASD(上下左右) + 空格炸弹 | 手机: 触摸拖动移动(上下左右) + 点💣放炸弹</div>
+<div id="toast"></div>
+<div id="tip">电脑: WASD/方向键移动 · 空格炸弹 · Q旋转 · E激光 | 手机: 拖动移动 · 💣炸弹 · 🌀/🔴点按</div>
 
 <div id="startScreen" class="overlay">
 <div style="font-size:32px;color:#ff0">✈️ 飞机大战</div>
@@ -80,18 +97,18 @@ var BOSS_SCORE = 3000;
 var BOSS_CONFIG = [
     {   // BOSS 1 · 烈焰战机
         name: '烈焰战机', speed: 1.5,
-        phases: [{ hp: 900, skills: ['fan','ring','aim'] }]
+        phases: [{ hp: 4500, skills: ['fan','ring','aim'] }]
     },
     {   // BOSS 2 · 暗影旋涡
         name: '暗影旋涡', speed: 2.0,
-        phases: [{ hp: 1500, skills: ['spiral','cross','homing','ring'] }]
+        phases: [{ hp: 7500, skills: ['spiral','cross','homing','ring'] }]
     },
     {   // BOSS 3 · 末日泰坦（3 阶段，血量巨大）
         name: '末日泰坦', speed: 1.2,
         phases: [
-            { hp: 1400, skills: ['laser','spread'],                label: 'I'   },
-            { hp: 1600, skills: ['ring','spiral','cross'],          label: 'II'  },
-            { hp: 2200, skills: ['laser','ring','spiral','summon'], label: 'III' }
+            { hp: 7000,  skills: ['laser','spread'],                  label: 'I'   },
+            { hp: 8000,  skills: ['ring','spiral','cross'],            label: 'II'  },
+            { hp: 11000, skills: ['laser','ring','spiral','summon','nova'], label: 'III' }  // 🌟 终阶新增炫酷「末日新星」技能
         ]
     }
 ];
@@ -151,14 +168,37 @@ var touchDX = 0, touchDY = 0;
 var powerLevel = 1, shield = false, bombs = 0, invincible = 0;
 var bombCooldown = 0;          // 💣 炸弹使用冷却（帧数，5秒 = 300帧@60fps）
 var BOMB_COOLDOWN_FRAMES = 300; // 5 秒冷却时长
+// 🌀 主动技能：旋转（火力 Lv5 解锁）—— 按 Q / 点按钮释放，非自动
+var spinActive = 0, spinCooldown = 0, playerSpinAngle = 0;
+var SPIN_DURATION = 300, SPIN_COOLDOWN = 720;   // 持续 5 秒 / 冷却 12 秒；转速 0.5~3×（随火力）
+// 🔴 主动技能：激光（火力 Lv10 解锁）—— 按 E / 点按钮释放，单道光束
+var laserActive = 0, laserCooldown = 0, laserTick = 0;
+var LASER_DURATION = 300, LASER_COOLDOWN = 900;  // 持续 5 秒 / 冷却 15 秒；3伤害 × 25次/秒
 var player = { x: 0, y: 0, w: 36, h: 44, speed: 5, cooldown: 0 };
 var bullets = [], enemyBullets = [], enemies = [], explosions = [], items = [], effects = [], warnings = [];
+var trails = [];                    // 机翼后 / 子弹彩色尾迹粒子
+// 🔥 开大（被动触发，不可手动）：攻击时概率触发，持续 2 秒，每秒 75 发子弹
+var ultActive = 0, ultGrace = 0, ultFireAccum = 0, ultToggle = 0;
+var ULT_DURATION = 180;             // 持续 3 秒 @60fps
+var ULT_FIRE_RATE = 75;             // 每秒子弹数
+var ULT_PROB_BASE = 0.02, ULT_PROB_LV5 = 0.03;  // Lv5+ 概率提升到 3%
+var ULT_BIG_CHANCE = 0.005;        // Lv10 时「50 伤 + 彩虹」子弹占比 = 0.5%
+var ULT_BIG_DMG = 50;
+var NORMAL_DMG = 10;               // 普通子弹伤害（敌机/Boss 统一）
+function getUltProb() { return powerLevel >= 5 ? ULT_PROB_LV5 : ULT_PROB_BASE; }
+function getWingSpan() { return 14 + Math.min(powerLevel, 8) * 2; }
 var stars = [];
 for (var si = 0; si < 60; si++) stars.push({ x: Math.random()*500, y: Math.random()*800, s: Math.random()*2+0.5, speed: Math.random()*2+0.5 });
 var boss = null;
 
 // ---- 输入 ----
-document.addEventListener('keydown', function(e) { keys[e.key] = true; if (e.key === ' ' && running) useBomb(); });
+document.addEventListener('keydown', function(e) {
+    keys[e.key] = true;
+    if (!running) return;
+    if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); useBomb(); }
+    else if (e.key === 'q' || e.key === 'Q') { e.preventDefault(); activateSpin(); }
+    else if (e.key === 'e' || e.key === 'E') { e.preventDefault(); activateLaser(); }
+});
 document.addEventListener('keyup', function(e) { keys[e.key] = false; });
 // 🎮 相对拖动：手指移动量累加到 touchDX/touchDY，update 里应用到玩家（支持上下左右）
 function onTouchStart(e) {
@@ -185,6 +225,9 @@ canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
 function initGame() {
     score = 0; lives = MAX_LIVES; bossActive = false; bossDefeatedCount = 0;
     powerLevel = 1; shield = false; bombs = 0; invincible = 0; bombCooldown = 0;
+    spinActive = 0; spinCooldown = 0; playerSpinAngle = 0;
+    laserActive = 0; laserCooldown = 0; laserTick = 0;
+    ultActive = 0; ultGrace = 0; ultFireAccum = 0; ultToggle = 0; trails = [];
     bullets = []; enemyBullets = []; enemies = []; explosions = []; items = []; effects = []; warnings = [];
     boss = null;
     player.x = canvas.width / 2; player.y = canvas.height - 70; player.cooldown = 0;
@@ -213,20 +256,34 @@ function setText(id, v) { var el = document.getElementById(id); if (el) el.textC
 
 function shoot() {
     // 弹道规则：
-    //   Lv1~Lv3 —— 集中在中间，竖直向上
-    //   Lv4      —— 两边扇形发射（左右各 2 根，向两侧展开）
-    //   Lv5~Lv10 —— 中间竖直 + 两边扇形（左右各 2 根，共 5 根）
+    //   🌀 旋转时 —— 所有子弹从机头沿机头朝向发射（螺旋弹幕）
+    //   静止时   —— Lv1~Lv3 集中中间竖直；Lv4 两边扇形；Lv5~Lv10 中间+两边扇形
     var cx = player.x, cy = player.y - 22;
     var sp = 8; // 子弹速度标量
 
+    // ===== 🌀 旋转：子弹从机头发射，方向 = 机头朝向（随自转角度变化）=====
+    if (spinActive > 0) {
+        var noseAngle = -Math.PI / 2 + playerSpinAngle;   // 机头朝向（弧度）
+        var nx = cx + Math.sin(playerSpinAngle) * 22;      // 机头端点 x
+        var ny = cy + 22 * (1 - Math.cos(playerSpinAngle)); // 机头端点 y（θ=0 时 = cy）
+        var count = Math.min(powerLevel, 5);               // 火力越高弹幕越密
+        var spread = 0.07;
+        for (var ni = 0; ni < count; ni++) {
+            var na = noseAngle + (ni - (count - 1) / 2) * spread;
+            bullets.push({ x: nx - 1.5, y: ny, w: 3, h: 10, speed: sp, vx: Math.cos(na) * sp, vy: Math.sin(na) * sp, damage: NORMAL_DMG });
+        }
+        playSound('shoot');
+        return;
+    }
+
     if (powerLevel <= 3) {
-        // 集中在中间，全部竖直向上
+        // 集中在中间，全部竖直向上（旋转时也统一从机头发射）
         var n = powerLevel; // 1/2/3
         var spacing = 6;
         var startX = cx - (n - 1) * spacing / 2;
         for (var i = 0; i < n; i++) {
             var bx = startX + i * spacing;
-            bullets.push({ x: bx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: 0, vy: -sp });
+            bullets.push({ x: bx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: 0, vy: -sp, damage: NORMAL_DMG });
         }
     } else if (powerLevel === 4) {
         // 两边扇形发射：左右各 2 根（散射收敛到约 ±9°，总张角约 18°）
@@ -234,19 +291,141 @@ function shoot() {
         var spread = 0.078;
         for (var j = 0; j < offs4.length; j++) {
             var aj = -Math.PI/2 + offs4[j] * spread;
-            bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: Math.cos(aj)*sp, vy: Math.sin(aj)*sp });
+            bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: Math.cos(aj)*sp, vy: Math.sin(aj)*sp, damage: NORMAL_DMG });
         }
     } else {
         // Lv5~Lv10：中间 1 根竖直 + 左右各 2 根扇形（共 5 根）
-        bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: 0, vy: -sp }); // 正中
+        bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: 0, vy: -sp, damage: NORMAL_DMG }); // 正中
         var offs5 = [-2, -1, 1, 2];
         var spread5 = 0.078;
         for (var k = 0; k < offs5.length; k++) {
             var ak = -Math.PI/2 + offs5[k] * spread5;
-            bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: Math.cos(ak)*sp, vy: Math.sin(ak)*sp });
+            bullets.push({ x: cx - 1.5, y: cy, w: 3, h: 10, speed: sp, vx: Math.cos(ak)*sp, vy: Math.sin(ak)*sp, damage: NORMAL_DMG });
         }
     }
     playSound('shoot');
+}
+
+// 💬 临时提示气泡
+var toastTimer = 0;
+function flashTip(msg) {
+    var t = document.getElementById('toast');
+    if (!t) return;
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() { t.classList.remove('show'); }, 1500);
+}
+
+// 🌀 旋转技能：Lv5 解锁，手动释放。激活后战机高速自转（0.5~3×随火力），期间无敌
+function activateSpin() {
+    if (!running) return;
+    if (powerLevel < 5) { flashTip('🔒 旋转需火力 Lv.5 解锁'); return; }
+    if (spinActive > 0) return;      // 正在释放中
+    if (spinCooldown > 0) return;    // 冷却中
+    spinActive = SPIN_DURATION; spinCooldown = SPIN_COOLDOWN;
+    invincible = Math.max(invincible, SPIN_DURATION); // 旋转期间无敌
+    playSound('powerup'); updateHUD();
+}
+
+// 🔴 激光技能：Lv10 解锁，手动释放。单道光束，3伤害 × 25次/秒
+function activateLaser() {
+    if (!running) return;
+    if (powerLevel < 10) { flashTip('🔒 激光需火力 Lv.10 解锁'); return; }
+    if (laserActive > 0) return;     // 正在释放中
+    if (laserCooldown > 0) return;   // 冷却中
+    laserActive = LASER_DURATION; laserCooldown = LASER_COOLDOWN; laserTick = 0;
+    playSound('powerup'); updateHUD();
+}
+
+// 激光每 tick 的伤害判定（穿透：沿光束方向的敌机全部受伤；旋转时激光随之旋转，命中同步）
+function applyLaserHit() {
+    var angle = spinActive > 0 ? playerSpinAngle : 0;
+    var dx = Math.sin(angle), dy = -Math.cos(angle);  // 光束方向（局部朝上 → 世界）
+    var len = player.y;                                // 到屏幕顶端的长度
+    var half = 8, px = player.x, py = player.y, dead = [];
+    enemies.forEach(function(e, i) {
+        var ex = e.x + e.w/2, ey = e.y + e.h/2;
+        var t = (ex - px) * dx + (ey - py) * dy;       // 投影到光束
+        if (t < 0 || t > len) return;
+        var projX = px + dx * t, projY = py + dy * t;
+        var dist = Math.sqrt((ex - projX) * (ex - projX) + (ey - projY) * (ey - projY));
+        if (dist < half + Math.max(e.w, e.h) / 2) {
+            e.hp -= 3;
+            if (e.hp <= 0) dead.push(i);
+        }
+    });
+    dead.forEach(function(ei) {
+        var e = enemies[ei]; if (!e) return;
+        score += e.type === 'heavy' ? 40 : 15;
+        explode(e.x + e.w/2, e.y + e.h/2);
+        if (e.type === 'heavy' || Math.random() < 0.15) spawnItem(e.x + e.w/2, e.y + e.h/2);
+    });
+    enemies = enemies.filter(function(e, i) { return dead.indexOf(i) === -1; });
+    // Boss 命中（沿光束线段距离判定）
+    if (bossActive && boss) {
+        var bx = boss.x + boss.w/2, by = boss.y + boss.h/2;
+        var bt = (bx - px) * dx + (by - py) * dy;
+        if (bt > 0 && bt < len) {
+            var bprojX = px + dx * bt, bprojY = py + dy * bt;
+            var bdist = Math.sqrt((bx - bprojX) * (bx - bprojX) + (by - bprojY) * (by - bprojY));
+            if (bdist < half + Math.max(boss.w, boss.h) / 2) damageBoss(3);
+        }
+    }
+}
+
+// ============ 🔥 开大（被动触发，不可手动） ============
+// 触发条件：普通攻击时概率触发（Lv<5: 2%，Lv≥5: 3%），持续 2 秒
+function startUltimate() {
+    ultActive = ULT_DURATION; ultFireAccum = 0; ultToggle = 0;
+    playSound('powerup');
+    effects.push({ kind: 'flash', timer: 18, maxTimer: 18 }); // 全屏闪光反馈
+    flashTip('🔥 开大！');
+    updateHUD();
+}
+
+// 开大子弹：从机翼下两个加特林交替发射，每发在扇形范围内随机角度 —— 持续 3 秒，每秒 75 发
+// Lv10 时部分子弹 = 50 伤 + 彩虹尾迹；🌀 旋转时随整机旋转沿机头朝向扇形散射
+function spawnUltBullet() {
+    var left = (ultToggle++ % 2 === 0);
+    var ws = getWingSpan();
+    var lx = left ? -ws : ws, ly = 10; // 加特林局部坐标（相对玩家中心）
+    var wx, wy, sp = 9;
+    // 基础朝向：旋转时 = 机头朝向；静止时 = 竖直向上
+    var baseAngle = spinActive > 0 ? (-Math.PI / 2 + playerSpinAngle) : -Math.PI / 2;
+    // 🔑 扇形随机角度：每发在 ±FAN_HALF 内随机，形成散射弹幕
+    var FAN_HALF = 0.42; // 约 ±24°
+    var angle = baseAngle + (Math.random() - 0.5) * 2 * FAN_HALF;
+    if (spinActive > 0) {
+        // 整机旋转 → 加特林世界坐标取旋转后位置
+        var c = Math.cos(playerSpinAngle), s = Math.sin(playerSpinAngle);
+        wx = player.x + lx * c - ly * s;
+        wy = player.y + lx * s + ly * c;
+    } else {
+        wx = player.x + lx; wy = player.y + ly;
+    }
+    var vx = Math.cos(angle) * sp, vy = Math.sin(angle) * sp;
+    var isBig = (powerLevel >= 10 && Math.random() < ULT_BIG_CHANCE);
+    var dmg = isBig ? ULT_BIG_DMG : NORMAL_DMG;
+    bullets.push({
+        x: wx - 3, y: wy, w: isBig ? 6 : 3, h: isBig ? 14 : 10,
+        speed: sp, vx: vx, vy: vy,
+        damage: dmg, rainbow: isBig, ult: true
+    });
+}
+
+// 机翼后尾迹：颜色随火力等级变化，Lv10 为彩色循环；结束后清除
+var WING_TRAIL_COLORS = { 1:'#0af', 2:'#0cf', 3:'#0fc', 4:'#0f8', 5:'#0af', 6:'#0fc', 7:'#0f8', 8:'#ff0', 9:'#f80', 10:null }; // 10=null→彩色循环
+function spawnWingTrails() {
+    var ws = getWingSpan(), baseCol = (powerLevel >= 10) ? null : (WING_TRAIL_COLORS[powerLevel] || '#0af');
+    [-ws, ws].forEach(function(dx) {
+        trails.push({
+            x: player.x + dx, y: player.y + 16,
+            vx: (Math.random() - 0.5) * 0.6, vy: 1 + Math.random(),
+            life: 22, maxLife: 22,
+            hue: Math.random() * 360, rainbow: powerLevel >= 10, color: baseCol,
+            size: 3 + Math.random() * 2.5
+        });
+    });
 }
 
 // 💣 炸弹：对所有敌机造成 10 点伤害 + 清除全屏子弹（含预警）+ 对 Boss 造成 10 点伤害
@@ -303,7 +482,8 @@ function updateBossBarText() {
     if (!bt || !boss) return;
     var phaseLabel = '';
     if (boss.kind === 2) phaseLabel = ' · 阶段' + (boss.phase+1) + '/3';
-    bt.textContent = '👹 BOSS ' + (boss.kind+1) + '/3 · ' + BOSS_CONFIG[boss.kind].name + phaseLabel;
+    var total = Math.max(0, Math.round(boss.totalHp)) + '/' + boss.totalMaxHp;
+    bt.textContent = '👹 BOSS ' + (boss.kind+1) + '/3 · ' + BOSS_CONFIG[boss.kind].name + phaseLabel + ' · ' + total;
 }
 
 function spawnBoss() {
@@ -320,6 +500,7 @@ function spawnBoss() {
         phase: 0, skillTimer: 0, skillIndex: 0,
         speed: cfg.speed, enterComplete: false, phaseTransition: 60,
         spiralActive: 0, spiralAngle: 0,
+        novaCharge: 0, novaArm: 0,
         // 🎲 随机移动：速度分量 + 换向计时
         vx: (Math.random() < 0.5 ? -1 : 1) * (0.6 + Math.random()*0.6),
         vy: (Math.random() < 0.5 ? -1 : 1) * (0.3 + Math.random()*0.4),
@@ -342,7 +523,7 @@ function damageBoss(amt) {
             boss.phase++;
             boss.hp = cfg.phases[boss.phase].hp;
             boss.maxHp = boss.hp;
-            boss.skillTimer = 0; boss.skillIndex = 0; boss.spiralActive = 0;
+            boss.skillTimer = 0; boss.skillIndex = 0; boss.spiralActive = 0; boss.novaCharge = 0;
             boss.phaseTransition = 90; // 约1.5秒过渡（无敌喘息）
             playSound('bossAlert');
             updateBossBarText();
@@ -359,6 +540,7 @@ function updateBossBar() {
         var pct = (boss.totalHp / boss.totalMaxHp) * 100;
         bbf.style.width = Math.max(0, pct) + '%';
     }
+    updateBossBarText(); // 同步刷新血量数字
 }
 
 function defeatBoss() {
@@ -427,6 +609,11 @@ function castSkill(sk) {
             spawnEnemyAt(boss.x + 10, 'heavy');
             spawnEnemyAt(boss.x + boss.w - 10, 'scout');
             break;
+        case 'nova': // 🌟 末日新星：蓄力后爆发巨型环形弹幕 + 追踪内圈
+            boss.novaCharge = 90;   // 1.5 秒蓄力（无敌预警）
+            boss.novaArm = 0;
+            playSound('bossAlert');
+            break;
     }
 }
 
@@ -442,6 +629,26 @@ function updateBossSkills() {
             var sa = boss.spiralAngle + arm * Math.PI;
             enemyBullets.push({ x: bx, y: by, w: 5, h: 5, speed: 2.6, vx: Math.cos(sa)*2.6, vy: Math.sin(sa)*2.6 });
         }
+    }
+
+    // 🌟 末日新星（nova）：蓄力倒计时 → 0 时爆发巨型环形弹幕 + 内圈瞄准弹
+    if (boss.novaCharge > 0) {
+        boss.novaCharge--;
+        if (boss.novaCharge <= 0) {
+            var novaCount = 40;
+            for (i = 0; i < novaCount; i++) {
+                var na = (Math.PI * 2 / novaCount) * i + (boss.novaArm || 0);
+                enemyBullets.push({ x: bx, y: by, w: 8, h: 8, speed: 3.2, vx: Math.cos(na) * 3.2, vy: Math.sin(na) * 3.2, glow: true });
+            }
+            // 内圈：6 发朝玩家的瞄准弹
+            for (i = -2; i <= 3; i++) {
+                var aa = Math.atan2(player.y - by, player.x - bx) + i * 0.18;
+                enemyBullets.push({ x: bx, y: by, w: 7, h: 7, speed: 4, vx: Math.cos(aa) * 4, vy: Math.sin(aa) * 4, glow: true });
+            }
+            playSound('explosion');
+            effects.push({ kind: 'flash', timer: 20, maxTimer: 20 });
+        }
+        return; // 蓄力/爆发当拍不释放其它技能
     }
 
     if (boss.phaseTransition > 0) {
@@ -495,6 +702,28 @@ function updateHUD() {
     setText('livesVal', 'x' + Math.max(0, lives));
     setText('powerVal', powerLevel); setText('bombVal', bombs);
     updateBombButton(); // 💣 同步炸弹按钮（数量 / 冷却倒计时）
+    updateSkillButtons(); // 🌀🔴 同步技能按钮（解锁 / 冷却 / 激活）
+}
+
+// 🌀🔴 技能按钮：冷却中显示剩余秒数并置灰，未解锁显示 Lv，就绪显示图标
+function updateSkillButtons() {
+    updateOneSkillButton('spinBtn', spinCooldown, powerLevel >= 5, '🌀', 'Lv5');
+    updateOneSkillButton('laserBtn', laserCooldown, powerLevel >= 10, '🔴', 'Lv10');
+}
+function updateOneSkillButton(id, cd, unlocked, iconTxt, lockTxt) {
+    var btn = document.getElementById(id);
+    if (!btn) return;
+    var ic = btn.querySelector('.ic');
+    if (cd > 0) {
+        btn.classList.add('disabled');
+        if (ic) ic.textContent = Math.ceil(cd / 60);
+    } else if (unlocked) {
+        btn.classList.remove('disabled');
+        if (ic) ic.textContent = iconTxt;
+    } else {
+        btn.classList.remove('disabled');
+        if (ic) ic.textContent = lockTxt;
+    }
 }
 
 // 💣 炸弹按钮显示：冷却中显示剩余秒数并置灰，否则显示 💣+数量
@@ -528,9 +757,47 @@ function update() {
     if (invincible > 0) invincible--;
     if (bombCooldown > 0) { bombCooldown--; updateBombButton(); } // 💣 炸弹冷却倒计时
 
-    var cd = powerLevel <= 5 ? 16 : Math.max(12, 16 - (powerLevel-5)*1.0);
-    if (player.cooldown <= 0) { shoot(); player.cooldown = cd; }
-    player.cooldown--;
+    // 🌀 旋转：累计自转角度（转速 0.5~3× 随火力）
+    if (spinActive > 0) {
+        spinActive--;
+        var spinMult = (powerLevel < 5) ? 0 : (powerLevel - 4) * 0.5;
+        playerSpinAngle += 0.06 * spinMult;
+    }
+    if (spinCooldown > 0) spinCooldown--;
+    // 🔴 激光：持续期间每帧累加 25，满 60 触发一次 → 25 次/秒；伤害 3
+    if (laserActive > 0) {
+        laserActive--;
+        laserTick += 25;
+        if (laserTick >= 60) { laserTick -= 60; applyLaserHit(); }
+    }
+    if (laserCooldown > 0) laserCooldown--;
+    updateSkillButtons();
+
+    // ===== 发射逻辑 =====
+    // 🔴 使用激光时不发射任何子弹（含开大）
+    if (laserActive <= 0) {
+        if (ultActive > 0) {
+            // 🔥 开大：每秒 75 发，从机翼下两个加特林交替发射
+            ultFireAccum += ULT_FIRE_RATE / 60;
+            while (ultFireAccum >= 1) { ultFireAccum -= 1; spawnUltBullet(); }
+            spawnWingTrails();
+        } else {
+            // 普通射击（旋转时子弹从机头发射）
+            var cd = powerLevel <= 5 ? 16 : Math.max(12, 16 - (powerLevel-5)*1.0);
+            if (player.cooldown <= 0) {
+                shoot(); player.cooldown = cd;
+                // 🎲 攻击时概率开大（被动触发，不可手动）
+                if (ultGrace <= 0 && Math.random() < getUltProb()) startUltimate();
+            }
+            player.cooldown--;
+        }
+    }
+    // 开大计时：结束 → 进入 1 秒 Grace 并清除机翼尾迹
+    if (ultActive > 0) {
+        ultActive--;
+        if (ultActive <= 0) { ultGrace = 60; trails = []; }
+    }
+    if (ultGrace > 0) ultGrace--;
 
     bullets.forEach(function(b) { b.x += b.vx || 0; b.y += b.vy || -b.speed; });
     bullets = bullets.filter(function(b) { return b.y > -15 && b.x > -10 && b.x < canvas.width+10; });
@@ -618,16 +885,17 @@ function update() {
     warnings.forEach(function(w) { w.timer--; });
     warnings = warnings.filter(function(w) { return w.timer > 0; });
 
-    // 碰撞：玩家子弹
+    // 碰撞：玩家子弹（伤害由子弹 damage 决定，普通=10，开大50伤子弹=50）
     var dead = {};
     bullets.forEach(function(b) {
+        var dmg = b.damage || 1;
         enemies.forEach(function(e, ei) {
             if (collide(b, e)) {
-                b.y = -999; e.hp--;
+                b.y = -999; e.hp -= dmg;
                 if (e.hp <= 0) dead[ei] = true;
             }
         });
-        if (bossActive && boss && collide(b, boss)) { b.y = -999; damageBoss(10); }
+        if (bossActive && boss && collide(b, boss)) { b.y = -999; damageBoss(dmg); }
     });
     Object.keys(dead).forEach(function(ei) {
         ei = parseInt(ei);
@@ -649,6 +917,9 @@ function update() {
 
     explosions.forEach(function(ex) { ex.r += 1.5; ex.alpha -= 0.04; });
     explosions = explosions.filter(function(ex) { return ex.alpha > 0; });
+    // 尾迹粒子更新（移动 + 衰减；rainbow 色相持续循环）
+    trails.forEach(function(t) { t.x += t.vx; t.y += t.vy; t.life--; if (t.rainbow) t.hue = (t.hue + 6) % 360; });
+    trails = trails.filter(function(t) { return t.life > 0; });
     effects.forEach(function(ef) { ef.timer--; });
     effects = effects.filter(function(ef) { return ef.timer > 0; });
     updateHUD();
@@ -660,6 +931,8 @@ function drawPlayer() {
     if (invincible > 0 && Math.floor(invincible/3)%2 === 0) return;
     var pl = powerLevel; // 当前火力等级，决定战机外观进化程度
     ctx.save(); ctx.translate(player.x, player.y);
+    // 🌀 旋转技能激活时：整机（含光环/机身/机翼）随火力自转 0.5~3×
+    if (spinActive > 0) ctx.rotate(playerSpinAngle);
     if (shield) { ctx.strokeStyle = '#0ff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0,0,34,0,Math.PI*2); ctx.stroke(); }
 
     // ===== Lv10：彩色环绕光环 —— 垫在最底层（不遮挡机身/机翼），圆心严格居中 (0,0) =====
@@ -779,11 +1052,50 @@ function drawPlayer() {
         ctx.fillStyle = tg3; ctx.beginPath(); ctx.ellipse(9,24,4,thrust*0.5,0,0,Math.PI*2); ctx.fill();
     }
 
+    // ===== 🔥 开大：机翼下两个加特林（开大期间始终显示，随整机旋转）=====
+    if (ultActive > 0) {
+        var ws = getWingSpan(), rot = (Date.now() / 18) % (Math.PI * 2);
+        [-ws, ws].forEach(function(gx) {
+            ctx.fillStyle = '#3a4a5a';                 // 支架
+            ctx.fillRect(gx - 3, 10, 6, 12);
+            ctx.save();
+            ctx.translate(gx, 22);
+            ctx.rotate(rot);                            // 炮管旋转动画
+            ctx.fillStyle = '#6c7a8a';
+            ctx.fillRect(-2, 0, 4, 11);
+            ctx.fillStyle = '#9aa8b8';
+            ctx.fillRect(-3, 11, 6, 3);
+            ctx.restore();
+            ctx.fillStyle = '#ffe08a';                  // 枪口火光
+            ctx.beginPath(); ctx.arc(gx, 22, 3.2, 0, Math.PI * 2); ctx.fill();
+        });
+    }
+
     ctx.restore();
 }
 
-// ===== 玩家子弹：简洁发光胶囊（无闪光芒刺） =====
+// ===== 玩家子弹：简洁发光胶囊（无闪光芒刺）；开大 50 伤子弹为彩虹 + 尾迹 =====
 function drawBullet(b) {
+    // 🌈 开大·50 伤子弹：彩色弹体 + 拖尾
+    if (b.rainbow) {
+        b._hue = (b._hue == null ? Math.random() * 360 : b._hue + 9) % 360;
+        var hh = b._hue;
+        ctx.save();
+        ctx.translate(b.x + b.w / 2, b.y + b.h / 2);
+        // 拖尾（沿飞行方向向下的彩色光带）
+        var tg = ctx.createLinearGradient(0, b.h * 0.5, 0, b.h * 0.5 + 26);
+        tg.addColorStop(0, 'hsla(' + hh + ',100%,65%,0.9)');
+        tg.addColorStop(1, 'hsla(' + hh + ',100%,65%,0)');
+        ctx.fillStyle = tg;
+        ctx.fillRect(-b.w * 0.6, b.h * 0.5, b.w * 1.2, 26);
+        // 弹体
+        ctx.fillStyle = 'hsl(' + hh + ',100%,72%)';
+        ctx.beginPath(); ctx.ellipse(0, 0, b.w * 0.6, b.h / 2, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.ellipse(0, -b.h * 0.1, b.w * 0.35, b.h * 0.28, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+        return;
+    }
     ctx.save();
     ctx.translate(b.x + b.w / 2, b.y + b.h / 2);
     // 柔和光晕
@@ -928,6 +1240,26 @@ function drawBoss() {
         // 双臂炮管
         ctx.fillStyle = '#555'; ctx.fillRect(-44,22,14,20); ctx.fillRect(30,22,14,20);
         ctx.fillStyle = col; ctx.fillRect(-40,40,6,10); ctx.fillRect(34,40,6,10);
+
+        // 🌟 末日新星蓄力特效：反应炉超频脉动 + 扩张能量环 + 危险红光
+        if (boss.novaCharge > 0) {
+            var charge = 1 - boss.novaCharge / 90; // 0→1
+            var pulse = 0.5 + 0.5 * Math.sin(Date.now() / 30);
+            var radius = 30 + charge * 70;          // 能量环随蓄力扩张
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            // 外扩能量环
+            ctx.strokeStyle = 'rgba(255,' + Math.floor(60 + charge * 120) + ',' + Math.floor(charge * 60) + ',' + (0.9 - charge * 0.4) + ')';
+            ctx.lineWidth = 4 + pulse * 4;
+            ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.stroke();
+            // 内圈强闪光
+            var ng = ctx.createRadialGradient(0, 0, 0, 0, 0, 26 + charge * 30);
+            ng.addColorStop(0, 'rgba(255,255,255,' + (0.4 + charge * 0.5) + ')');
+            ng.addColorStop(0.5, 'rgba(255,120,0,' + (0.3 + charge * 0.5) + ')');
+            ng.addColorStop(1, 'rgba(255,0,0,0)');
+            ctx.fillStyle = ng; ctx.beginPath(); ctx.arc(0, 0, 26 + charge * 30, 0, Math.PI * 2); ctx.fill();
+            ctx.restore();
+        }
     }
     ctx.restore();
 }
@@ -971,10 +1303,53 @@ function draw() {
 
     items.forEach(drawItem);
     drawPlayer();
+    drawLaserBeam();
+    // 🌈 机翼后 / 子弹尾迹粒子（开大期间产生，结束后清除）
+    trails.forEach(function(t) {
+        var alpha = Math.max(0, t.life / t.maxLife);
+        if (t.rainbow) {
+            t.hue = (t.hue + 8) % 360;
+            ctx.fillStyle = 'hsla(' + t.hue + ',100%,65%,' + alpha + ')';
+        } else {
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = t.color;
+        }
+        ctx.beginPath(); ctx.arc(t.x, t.y, t.size * alpha, 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.globalAlpha = 1;
     bullets.forEach(drawBullet);
     enemyBullets.forEach(function(b) { ctx.fillStyle = b.laser?'#fff':(b.homing?'#fa0':'#f0f'); ctx.fillRect(b.x, b.y, b.w, b.h); });
     enemies.forEach(drawEnemy);
     drawBoss();
+}
+
+// 🔴 激光束绘制：单道光束（机头 → 屏幕顶端），粗一点；旋转时随战机一起旋转
+function drawLaserBeam() {
+    if (laserActive <= 0) return;
+    var angle = spinActive > 0 ? playerSpinAngle : 0;
+    var len = player.y; // 机头到屏幕顶端的距离
+    var pulse = 0.6 + 0.4 * Math.sin(Date.now() / 40);
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.rotate(angle);                       // 🔑 旋转时激光跟随
+    ctx.globalCompositeOperation = 'lighter';
+    // 外发光晕（加粗）
+    ctx.globalAlpha = 0.35 * pulse;
+    ctx.fillStyle = '#f33';
+    ctx.fillRect(-26, -len, 52, len);
+    // 主光束（红→黄渐变，加粗）
+    ctx.globalAlpha = 0.9;
+    var g = ctx.createLinearGradient(0, -len, 0, 0);
+    g.addColorStop(0, 'rgba(255,80,40,0.9)');
+    g.addColorStop(0.6, 'rgba(255,30,30,1)');
+    g.addColorStop(1, 'rgba(255,220,120,1)');
+    ctx.fillStyle = g;
+    ctx.fillRect(-12, -len, 24, len);
+    // 核心白线（加粗）
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(-3, -len, 6, len);
+    ctx.restore();
 }
 
 function loop() {
@@ -997,6 +1372,11 @@ function bindAll() {
     if (bb) {
         bb.addEventListener('touchstart', function(ev) { ev.preventDefault(); ev.stopPropagation(); useBomb(); }, { passive: false });
     }
+    // 🌀🔴 技能按钮（click + touchstart 双绑，阻止穿透到画布）
+    var sb = bind('spinBtn', activateSpin);
+    if (sb) sb.addEventListener('touchstart', function(ev) { ev.preventDefault(); ev.stopPropagation(); activateSpin(); }, { passive: false });
+    var lb = bind('laserBtn', activateLaser);
+    if (lb) lb.addEventListener('touchstart', function(ev) { ev.preventDefault(); ev.stopPropagation(); activateLaser(); }, { passive: false });
     bind('startScreen', function(ev) {
         if (ev.target && ev.target.id === 'startBtn') return;
         startGame();
@@ -1017,3 +1397,4 @@ loop();
 </script>
 </body>
 </html>
+
