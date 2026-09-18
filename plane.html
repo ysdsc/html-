@@ -43,9 +43,21 @@ canvas{display:block;background:#0a0a2a}
 #spinBtn:active{background:rgba(0,120,200,.95)}
 #laserBtn{right:16px;bottom:124px;border-color:#f33;background:rgba(70,0,0,.75);box-shadow:0 0 14px rgba(255,60,60,.5)}
 #laserBtn:active{background:rgba(160,0,0,.95)}
+/* 🔓 火力 Lv30「突破技」按钮：直接开大 10 秒 + 移速×2 + 回 3 血 */
+#breakBtn{left:50%;transform:translateX(-50%);bottom:16px;border-color:#fd4;background:rgba(80,60,0,.85);box-shadow:0 0 18px rgba(255,210,60,.65)}
+#breakBtn:active{background:rgba(150,110,0,.95)}
+#breakBtn .ic{font-size:20px}
+#breakBtn .cd{font-size:9px;line-height:1.1}
+/* 🔓 突破技激活期间的机身辉光（移速×2 的视觉反馈） */
+.break-aura{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:20;pointer-events:none;width:120px;height:120px;border-radius:50%;border:2px solid rgba(255,220,80,.7);box-shadow:0 0 40px 12px rgba(255,200,40,.45);opacity:0;transition:opacity .2s}
+.break-aura.on{opacity:1}
 /* 💬 提示气泡 */
 #toast{position:fixed;top:92px;left:50%;transform:translateX(-50%);z-index:45;color:#ff0;font:bold 15px monospace;text-shadow:0 0 6px #f90;opacity:0;transition:opacity .25s;pointer-events:none;white-space:nowrap}
 #toast.show{opacity:1}
+/* 🔓 火力突破上限（Lv30）标识 */
+#powerWrap.breakthrough{color:#ff0;text-shadow:0 0 6px #f90}
+#powerWrap.breakthrough #powerVal{color:#fff}
+#powerWrap.breakthrough::after{content:'（突破上限）';color:#f90;font-size:11px;margin-left:4px;text-shadow:0 0 5px #f90}
 </style>
 </head>
 <body>
@@ -58,14 +70,16 @@ canvas{display:block;background:#0a0a2a}
     <span id="livesVal">x5</span>
   </span>
 </div>
-<div class="power">火力: Lv.<span id="powerVal">1</span> | 💣<span id="bombVal">0</span></div>
+<div class="power">火力: <span id="powerWrap">Lv.<span id="powerVal">1</span></span> | 💣<span id="bombVal">0</span></div>
 </div>
 <button id="bombBtn" class="bomb-btn"><span id="bombIcon">💣</span><span id="bombCount">0</span></button>
 <button id="spinBtn" class="skill-btn"><span class="ic">🌀</span><span class="cd">Lv5</span></button>
 <button id="laserBtn" class="skill-btn"><span class="ic">🔴</span><span class="cd">Lv10</span></button>
+<button id="breakBtn" class="skill-btn"><span class="ic">⚡</span><span class="cd">Lv30</span></button>
+<div id="breakAura" class="break-aura"></div>
 <div id="bossBar"><div id="bossBarText">👹 BOSS 1/3</div><div id="bossBarFill"></div></div>
 <div id="toast"></div>
-<div id="tip">电脑: WASD/方向键移动 · 空格炸弹 · Q旋转 · E激光 | 手机: 拖动移动 · 💣炸弹 · 🌀/🔴点按</div>
+<div id="tip">电脑: WASD/方向键移动 · 空格炸弹 · Q旋转 · E激光 · R突破技 | 手机: 拖动移动 · 💣炸弹 · 🌀/🔴/⚡点按</div>
 
 <div id="startScreen" class="overlay">
 <div style="font-size:32px;color:#ff0">✈️ 飞机大战</div>
@@ -108,7 +122,7 @@ var BOSS_CONFIG = [
         phases: [
             { hp: 7000,  skills: ['laser','spread'],                  label: 'I'   },
             { hp: 8000,  skills: ['ring','spiral','cross'],            label: 'II'  },
-            { hp: 11000, skills: ['laser','ring','spiral','summon','nova'], label: 'III' }  // 🌟 终阶新增炫酷「末日新星」技能
+            { hp: 11000, skills: ['laser','ring','spiral','summon','shield_burst','nova','nova2'], label: 'III' }  // 🌟 终阶：防御形态(shield_burst) + 输出形态(nova / nova2毁灭新星)
         ]
     }
 ];
@@ -166,14 +180,23 @@ var keys = {};
 var touchActive = false, touchPrevX = null, touchPrevY = null;
 var touchDX = 0, touchDY = 0;
 var powerLevel = 1, shield = false, bombs = 0, invincible = 0;
-var bombCooldown = 0;          // 💣 炸弹使用冷却（帧数，5秒 = 300帧@60fps）
-var BOMB_COOLDOWN_FRAMES = 300; // 5 秒冷却时长
+var bombCooldown = 0;          // 💣 使用冷却（帧数，10秒 = 600帧@60fps）
+var BOMB_COOLDOWN_FRAMES = 600; // 10 秒冷却时长（使用后必须等 10 秒才能再次释放）
+var BOMB_REGEN_FRAMES = 1800;   // 💣 每 30 秒(1800帧@60fps)自动恢复 1 颗存量
+var bombRegenTimer = 0;         // 炸弹回复计时器（每满 30 秒 +1 颗，封顶 MAX_BOMBS）
 // 🌀 主动技能：旋转（火力 Lv5 解锁）—— 按 Q / 点按钮释放，非自动
 var spinActive = 0, spinCooldown = 0, playerSpinAngle = 0;
 var SPIN_DURATION = 300, SPIN_COOLDOWN = 720;   // 持续 5 秒 / 冷却 12 秒；转速 0.5~3×（随火力）
 // 🔴 主动技能：激光（火力 Lv10 解锁）—— 按 E / 点按钮释放，单道光束
 var laserActive = 0, laserCooldown = 0, laserTick = 0;
 var LASER_DURATION = 300, LASER_COOLDOWN = 900;  // 持续 5 秒 / 冷却 15 秒；3伤害 × 25次/秒
+// 🔓 火力 Lv30「突破技」（主动技能，仅 Lv30 解锁）：使用后 → 直接开大 10 秒 + 移速×2 + 回 3 血
+var breakActive = 0, breakCooldown = 0;
+var BREAK_DURATION = 600;      // 持续 10 秒 @60fps（开大持续 10 秒）
+var BREAK_COOLDOWN = 1800;     // 冷却 30 秒 @60fps
+var BREAK_HEAL = 3;            // 使用后立即恢复 3 滴血
+var BREAK_SPEED_MULT = 2;      // 移速倍率
+var BREAK_BASE_SPEED = 5;      // 基准移速（player.speed 在激活期间 = 基准 × 倍率）
 var player = { x: 0, y: 0, w: 36, h: 44, speed: 5, cooldown: 0 };
 var bullets = [], enemyBullets = [], enemies = [], explosions = [], items = [], effects = [], warnings = [];
 var trails = [];                    // 机翼后 / 子弹彩色尾迹粒子
@@ -182,14 +205,24 @@ var ultActive = 0, ultGrace = 0, ultFireAccum = 0, ultToggle = 0;
 var ULT_DURATION = 180;             // 持续 3 秒 @60fps
 var ULT_FIRE_RATE = 75;             // 每秒子弹数
 var ULT_PROB_BASE = 0.02, ULT_PROB_LV5 = 0.03;  // Lv5+ 概率提升到 3%
-var ULT_BIG_CHANCE = 0.005;        // Lv10 时「50 伤 + 彩虹」子弹占比 = 0.5%
+var ULT_BIG_CHANCE = 0.01;         // Lv10 时「50 伤 + 彩虹」子弹占比 = 1%
+// 💣 炸弹存储上限：3 → 10
+var MAX_BOMBS = 10;
+var START_BOMBS = 3; // 💣 开局自带 3 颗（之后每 30 秒回复 1 颗，封顶 10）
 var ULT_BIG_DMG = 50;
 var NORMAL_DMG = 10;               // 普通子弹伤害（敌机/Boss 统一）
+var MAX_POWER = 30;                // 🔓 火力上限 Lv.30（Lv11~Lv29 无加成，仅 Lv30 突破）
 function getUltProb() { return powerLevel >= 5 ? ULT_PROB_LV5 : ULT_PROB_BASE; }
+// 🔓 是否处于「突破上限」状态：仅 Lv30 为真（Lv11~Lv29 均为 false，无任何加成）
+function isBreakthrough() { return powerLevel >= MAX_POWER; }
+// 🔓 Lv30 时开大 100% 发射 50 伤子弹；其余等级沿用 1% 概率
+function getBigChance() { return isBreakthrough() ? 1.0 : ULT_BIG_CHANCE; }
 function getWingSpan() { return 14 + Math.min(powerLevel, 8) * 2; }
 var stars = [];
 for (var si = 0; si < 60; si++) stars.push({ x: Math.random()*500, y: Math.random()*800, s: Math.random()*2+0.5, speed: Math.random()*2+0.5 });
 var boss = null;
+// 💖 爱心生成计时器（每 5 秒一次 10% 概率），避免与敌机刷新竞争
+var heartSpawnTimer = 300;
 
 // ---- 输入 ----
 document.addEventListener('keydown', function(e) {
@@ -198,6 +231,7 @@ document.addEventListener('keydown', function(e) {
     if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); useBomb(); }
     else if (e.key === 'q' || e.key === 'Q') { e.preventDefault(); activateSpin(); }
     else if (e.key === 'e' || e.key === 'E') { e.preventDefault(); activateLaser(); }
+    else if (e.key === 'r' || e.key === 'R') { e.preventDefault(); activateBreak(); }
 });
 document.addEventListener('keyup', function(e) { keys[e.key] = false; });
 // 🎮 相对拖动：手指移动量累加到 touchDX/touchDY，update 里应用到玩家（支持上下左右）
@@ -224,11 +258,13 @@ canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
 // ---- 核心函数（全局，确保 onclick/监听器都能找到） ----
 function initGame() {
     score = 0; lives = MAX_LIVES; bossActive = false; bossDefeatedCount = 0;
-    powerLevel = 1; shield = false; bombs = 0; invincible = 0; bombCooldown = 0;
+    powerLevel = 1; shield = false; bombs = START_BOMBS; invincible = 0; bombCooldown = 0; bombRegenTimer = 0;
     spinActive = 0; spinCooldown = 0; playerSpinAngle = 0;
     laserActive = 0; laserCooldown = 0; laserTick = 0;
+    breakActive = 0; breakCooldown = 0; setBreakAura(false);
     ultActive = 0; ultGrace = 0; ultFireAccum = 0; ultToggle = 0; trails = [];
     bullets = []; enemyBullets = []; enemies = []; explosions = []; items = []; effects = []; warnings = [];
+    heartSpawnTimer = 300; // 💖 重置爱心计时器
     boss = null;
     player.x = canvas.width / 2; player.y = canvas.height - 70; player.cooldown = 0;
     setDisplay('bossBar', 'none');
@@ -337,6 +373,42 @@ function activateLaser() {
     playSound('powerup'); updateHUD();
 }
 
+// 🔓 火力 Lv30「突破技」：仅 Lv30 可用，使用后 → 直接开大 10 秒 + 移速×2 + 恢复 3 滴血
+//   - 直接开大：内部以「开大满配」运行（每秒 75 发，Lv30 → 100% 50 伤子弹），持续 10 秒
+//   - 移速×2：激活期间 player.speed = BREAK_BASE_SPEED × 2 = 10
+//   - 回 3 血：使用后瞬间 lives += 3（受 MAX_LIVES 上限约束）
+function activateBreak() {
+    if (!running) return;
+    if (!isBreakthrough()) { flashTip('🔒 突破技需火力 Lv.30 解锁'); return; }
+    if (breakActive > 0) return;   // 正在释放中
+    if (breakCooldown > 0) return; // 冷却中
+    // ① 直接开大（强制为「开大满配」，无视被动概率触发）
+    startBreakUltimate();
+    // ② 移速 ×2
+    player.speed = BREAK_BASE_SPEED * BREAK_SPEED_MULT;  // 5 × 2 = 10
+    // ③ 恢复 3 滴血
+    var before = lives;
+    lives = Math.min(MAX_LIVES, lives + BREAK_HEAL);
+    var healed = lives - before;
+    if (healed > 0) flashTip('💖 +' + healed + ' 生命');
+    // 持续时间 / 冷却 / 辉光
+    breakActive = BREAK_DURATION;
+    breakCooldown = BREAK_COOLDOWN;
+    setBreakAura(true);
+    playSound('powerup'); updateHUD();
+}
+
+// 🔓 突破技专属「开大」：与普通 startUltimate 相同逻辑，但无概率门槛、直接满配触发
+//   持续 10 秒，期间走 ultActive 的 75发/秒弹幕逻辑（Lv30 → 100% 50 伤子弹）
+function startBreakUltimate() {
+    ultActive = BREAK_DURATION;   // 覆盖默认 ULT_DURATION，使其 = 10 秒
+    ultFireAccum = 0; ultToggle = 0; ultGrace = 0;
+    playSound('powerup');
+    effects.push({ kind: 'flash', timer: 24, maxTimer: 24 });
+    flashTip('⚡ 突破技：开大 10秒 · 移速×2 · 回 3 血！');
+    updateHUD();
+}
+
 // 激光每 tick 的伤害判定（穿透：沿光束方向的敌机全部受伤；旋转时激光随之旋转，命中同步）
 function applyLaserHit() {
     var angle = spinActive > 0 ? playerSpinAngle : 0;
@@ -359,7 +431,12 @@ function applyLaserHit() {
         score += e.type === 'heavy' ? 40 : 15;
         explode(e.x + e.w/2, e.y + e.h/2);
         if (e.type === 'heavy' || Math.random() < 0.15) spawnItem(e.x + e.w/2, e.y + e.h/2);
+        // 🔓 突破上限后：击杀敌机有概率直接掉落火力道具（加速 Lv11~Lv29 爬升）
+        if (isBreakthrough() && powerLevel < MAX_POWER && Math.random() < 0.06) {
+            spawnItem(e.x + e.w/2, e.y + e.h/2, 'power');
+        }
     });
+
     enemies = enemies.filter(function(e, i) { return dead.indexOf(i) === -1; });
     // Boss 命中（沿光束线段距离判定）
     if (bossActive && boss) {
@@ -404,7 +481,7 @@ function spawnUltBullet() {
         wx = player.x + lx; wy = player.y + ly;
     }
     var vx = Math.cos(angle) * sp, vy = Math.sin(angle) * sp;
-    var isBig = (powerLevel >= 10 && Math.random() < ULT_BIG_CHANCE);
+    var isBig = (powerLevel >= 10 && Math.random() < getBigChance());   // 🔓 Lv30 → 100% 出 50 伤子弹
     var dmg = isBig ? ULT_BIG_DMG : NORMAL_DMG;
     bullets.push({
         x: wx - 3, y: wy, w: isBig ? 6 : 3, h: isBig ? 14 : 10,
@@ -432,7 +509,7 @@ function spawnWingTrails() {
 function useBomb() {
     if (bombCooldown > 0) return;   // 🔑 冷却中，禁止使用
     if (bombs > 0) {
-        bombs--; bombCooldown = BOMB_COOLDOWN_FRAMES; playSound('explosion'); // 🔑 使用后进入 5 秒冷却
+        bombs--; bombCooldown = BOMB_COOLDOWN_FRAMES; playSound('explosion'); // 🔑 使用后进入 10 秒冷却
         var dead = [];
         enemies.forEach(function(e, i) {
             e.hp -= 10;
@@ -473,8 +550,16 @@ function spawnEnemy() {
     else spawnEnemyAt(x, 'scout');
 }
 
-function randomItemType() { var r = Math.random(); if (r < 0.4) return 'power'; if (r < 0.7) return 'shield'; return 'bomb'; }
-function spawnItem(x, y) { items.push({ x: x, y: y, type: randomItemType(), w: 24, h: 24, speed: 2 }); }
+// 💖 道具类型：power / shield
+// ⚠️ 炸弹不再从天上掉落（避免刷炸弹），只能通过初始存量使用
+// ⚠️ 爱心(heart)不再由打怪掉落——爱心只靠「每5秒10%自然生成」一种来源
+//    因此 randomItemType 道具池里不再包含 heart，拾取逻辑仍兼容 'heart'（保险）
+function randomItemType() {
+    var r = Math.random();
+    if (r < 0.40) return 'power';      // 40% 火力
+    return 'shield';                    // 60% 护盾（爱心区间并入护盾）
+}
+function spawnItem(x, y, forcedType) { items.push({ x: x, y: y, type: forcedType || randomItemType(), w: 24, h: 24, speed: 2 }); }
 
 // ---- Boss ----
 function updateBossBarText() {
@@ -501,6 +586,11 @@ function spawnBoss() {
         speed: cfg.speed, enterComplete: false, phaseTransition: 60,
         spiralActive: 0, spiralAngle: 0,
         novaCharge: 0, novaArm: 0,
+        // 🌟 末日泰坦 III 双重形态：防御(能量护盾) + 毁灭(nova2)
+        energyShield: 0, energyShieldMax: 0,   // 防御形态：可吸收伤害的能量护盾值
+        shieldBurst: 0,                         // shield_burst 展开剩余帧数
+        nova2Charge: 0, nova2Arm: 0,            // 毁灭形态：nova2 蓄力倒计时
+        formCooldown: 0,                        // 形态切换冷却（避免连续防御/毁灭）
         // 🎲 随机移动：速度分量 + 换向计时
         vx: (Math.random() < 0.5 ? -1 : 1) * (0.6 + Math.random()*0.6),
         vy: (Math.random() < 0.5 ? -1 : 1) * (0.3 + Math.random()*0.4),
@@ -514,8 +604,24 @@ function spawnBoss() {
 // Boss 受击（含阶段切换）
 function damageBoss(amt) {
     if (!boss || boss.phaseTransition > 0) return;
-    boss.hp -= amt;
-    boss.totalHp -= amt;
+    // 🛡️ 防御形态「量子护盾」：伤害先被护盾吸收，仅 15% 穿透；护盾归零后正常扣血
+    if (boss.phase === 2 && boss.energyShield > 0) {
+        var reduced = Math.max(1, Math.round(amt * 0.15));   // 85% 减伤
+        var absorbed = amt - reduced;
+        boss.energyShield -= absorbed;
+        if (boss.energyShield < 0) {
+            // 护盾被击穿：溢出伤害转为破盾反击（立即释放一圈反击弹幕）
+            spawnShieldCounter();
+            boss.energyShield = 0; boss.shieldBurst = 0;
+            effects.push({ kind: 'shieldBreak', x: boss.x + boss.w/2, y: boss.y + boss.h/2, timer: 36, maxTimer: 36 });
+            playSound('explosion');
+        }
+        boss.hp -= reduced;
+        boss.totalHp -= reduced;
+    } else {
+        boss.hp -= amt;
+        boss.totalHp -= amt;
+    }
     if (boss.hp <= 0) {
         var cfg = BOSS_CONFIG[boss.kind];
         if (boss.phase < cfg.phases.length - 1) {
@@ -524,6 +630,7 @@ function damageBoss(amt) {
             boss.hp = cfg.phases[boss.phase].hp;
             boss.maxHp = boss.hp;
             boss.skillTimer = 0; boss.skillIndex = 0; boss.spiralActive = 0; boss.novaCharge = 0;
+            boss.nova2Charge = 0; boss.shieldBurst = 0; boss.energyShield = 0; boss.energyShieldMax = 0; boss.formCooldown = 0;  // 🌟 重置双重形态
             boss.phaseTransition = 90; // 约1.5秒过渡（无敌喘息）
             playSound('bossAlert');
             updateBossBarText();
@@ -614,6 +721,26 @@ function castSkill(sk) {
             boss.novaArm = 0;
             playSound('bossAlert');
             break;
+
+        // 🛡️ 防御形态「量子护盾爆发」：展开巨大能量护盾，期间大幅减伤 + 反弹弹幕
+        case 'shield_burst':
+            if (boss.phase !== 2) break;                    // 仅末日泰坦 III 可用
+            boss.shieldBurst = 150;                         // 持续 2.5 秒
+            boss.energyShield = 6000;                       // 护盾值 ≈ 一整个阶段血量
+            boss.energyShieldMax = 6000;
+            boss.formCooldown = 300;                        // 护盾结束后 5 秒才再切形态
+            playSound('powerup');
+            effects.push({ kind: 'shieldExpand', x: bx, y: by, timer: 40, maxTimer: 40, r: 20 });
+            break;
+
+        // 💥 毁灭形态「末日新星Ⅱ」：蓄力 2.5 秒后爆发毁灭级全屏弹幕（终极输出）
+        case 'nova2':
+            if (boss.phase !== 2) break;
+            boss.nova2Charge = 150;                          // 2.5 秒蓄力（比 nova 更长、更危险）
+            boss.nova2Arm = Math.random() * Math.PI;         // 随机起始角度，避免固定朝向
+            playSound('bossAlert');
+            effects.push({ kind: 'flash', timer: 12, maxTimer: 12 });
+            break;
     }
 }
 
@@ -630,6 +757,22 @@ function updateBossSkills() {
             enemyBullets.push({ x: bx, y: by, w: 5, h: 5, speed: 2.6, vx: Math.cos(sa)*2.6, vy: Math.sin(sa)*2.6 });
         }
     }
+
+    // 🛡️ 防御形态「量子护盾爆发」：护盾存在期间大幅减伤，玩家子弹伤害绝大部分被吸收；
+    //    护盾存在时每 12 帧自动反弹一圈反击弹幕（输出不归零，攻防一体）
+    if (boss.energyShield > 0) {
+        if ((boss.skillTimer % 12 === 0)) {
+            for (var ci = -2; ci <= 2; ci++) {
+                var ca = Math.PI/2 + ci * 0.22;
+                enemyBullets.push({ x: bx, y: by, w: 6, h: 6, speed: 3.4, vx: Math.cos(ca)*3.4, vy: Math.sin(ca)*3.4, glow: true, shield: true });
+            }
+        }
+    }
+    if (boss.shieldBurst > 0) {
+        boss.shieldBurst--;
+        if (boss.shieldBurst <= 0) { boss.energyShield = 0; }  // 持续时间到 → 护盾消散
+    }
+    if (boss.formCooldown > 0) boss.formCooldown--;
 
     // 🌟 末日新星（nova）：蓄力倒计时 → 0 时爆发巨型环形弹幕 + 内圈瞄准弹
     if (boss.novaCharge > 0) {
@@ -651,6 +794,31 @@ function updateBossSkills() {
         return; // 蓄力/爆发当拍不释放其它技能
     }
 
+    // 💥 毁灭形态「末日新星Ⅱ」：2.5 秒蓄力 → 72 路毁灭弹幕 + 12 发精准瞄准 + 黑红膨胀特效
+    if (boss.nova2Charge > 0) {
+        boss.nova2Charge--;
+        // 蓄力期间持续吸附式预警：缓慢向玩家方向微调，增强压迫感
+        var nova2Prog = 1 - boss.nova2Charge / 150;
+        boss.nova2Arm += 0.04;                              // 能量漩涡持续旋转
+        if (boss.nova2Charge <= 0) {
+            var nova2Count = 72;                            // 比 nova 更密的环形覆盖
+            for (i = 0; i < nova2Count; i++) {
+                var n2a = (Math.PI * 2 / nova2Count) * i + (boss.nova2Arm || 0);
+                enemyBullets.push({ x: bx, y: by, w: 9, h: 9, speed: 3.4, vx: Math.cos(n2a) * 3.4, vy: Math.sin(n2a) * 3.4, glow: true, heavy: true });
+            }
+            // 内圈：12 发高精度瞄准弹（比 nova 更致命）
+            var nova2Inner = 12;
+            for (i = -nova2Inner/2; i < nova2Inner/2; i++) {
+                var n2aa = Math.atan2(player.y - by, player.x - bx) + i * 0.11;
+                enemyBullets.push({ x: bx, y: by, w: 8, h: 8, speed: 4.2, vx: Math.cos(n2aa) * 4.2, vy: Math.sin(n2aa) * 4.2, glow: true, heavy: true });
+            }
+            playSound('explosion');
+            effects.push({ kind: 'nova2Boom', x: bx, y: by, timer: 60, maxTimer: 60, prog: 0 });  // 💥 黑红膨胀毁灭特效
+            effects.push({ kind: 'flash', timer: 30, maxTimer: 30 });
+            boss.formCooldown = 240;                        // 爆发后 4 秒冷却，喘息窗口
+        }
+    }
+
     if (boss.phaseTransition > 0) {
         boss.phaseTransition--;
         return; // 阶段过渡期间不攻击
@@ -665,13 +833,32 @@ function updateBossSkills() {
 
     boss.skillTimer++;
     if (boss.skillTimer > interval) {
-        castSkill(skills[boss.skillIndex % skills.length]);
+        var sk;
+        // 🌟 末日泰坦 III：权重随机技能池，形态技(shield_burst/nova2)低频触发，避免连续防御/毁灭
+        if (boss.kind === 2 && boss.phase === 2 && boss.formCooldown <= 0) {
+            var r = Math.random();
+            if (boss.energyShield <= 0 && r < 0.14) sk = 'shield_burst';   // 14% 防御形态
+            else if (r < 0.30) sk = 'nova2';                                // 16% 毁灭形态
+            else if (r < 0.45) sk = 'nova';                                // 15% 普通新星
+        }
+        if (!sk) sk = skills[boss.skillIndex % skills.length];
+        castSkill(sk);
         boss.skillIndex++;
         boss.skillTimer = 0;
     }
 }
 
 function collide(a, b) { return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y; }
+
+// 🛡️ 破盾反击：护盾被击穿时向四周爆发一圈密集弹幕（攻防一体的代价）
+function spawnShieldCounter() {
+    if (!boss) return;
+    var bx = boss.x + boss.w/2, by = boss.y + boss.h;
+    for (var ci = 0; ci < 24; ci++) {
+        var ca = (Math.PI * 2 / 24) * ci;
+        enemyBullets.push({ x: bx, y: by, w: 7, h: 7, speed: 3.6, vx: Math.cos(ca)*3.6, vy: Math.sin(ca)*3.6, glow: true, shield: true });
+    }
+}
 function explode(x, y) { explosions.push({ x: x, y: y, r: 2, maxR: 20+Math.random()*15, alpha: 1 }); }
 
 function hitPlayer() {
@@ -694,13 +881,19 @@ function checkLeaderboard() {
     } catch (e) {}
 }
 
-function updateHUD() {
+var hudFrame = 0;
+function updateHUD(force) {
+    // 🚀 节流：默认每 6 帧(约0.1秒)刷新一次 DOM，避免每帧操作 layout 造成卡顿
+    hudFrame++;
+    if (!force && hudFrame % 6 !== 0) return;
     setText('scoreVal', score);
     // 红色长条：宽度按比例，旁边 x当前血量
     var fill = document.getElementById('lifeBarFill');
     if (fill) fill.style.width = Math.max(0, lives / MAX_LIVES * 100) + '%';
     setText('livesVal', 'x' + Math.max(0, lives));
     setText('powerVal', powerLevel); setText('bombVal', bombs);
+    var powerWrap = document.getElementById('powerWrap');
+    if (powerWrap) powerWrap.classList.toggle('breakthrough', isBreakthrough()); // 🔓 Lv30 显示「（突破上限）」
     updateBombButton(); // 💣 同步炸弹按钮（数量 / 冷却倒计时）
     updateSkillButtons(); // 🌀🔴 同步技能按钮（解锁 / 冷却 / 激活）
 }
@@ -709,6 +902,8 @@ function updateHUD() {
 function updateSkillButtons() {
     updateOneSkillButton('spinBtn', spinCooldown, powerLevel >= 5, '🌀', 'Lv5');
     updateOneSkillButton('laserBtn', laserCooldown, powerLevel >= 10, '🔴', 'Lv10');
+    updateOneSkillButton('breakBtn', breakCooldown, isBreakthrough(), '⚡', 'Lv30');
+    setBreakAura(breakActive > 0);
 }
 function updateOneSkillButton(id, cd, unlocked, iconTxt, lockTxt) {
     var btn = document.getElementById(id);
@@ -737,9 +932,15 @@ function updateBombButton() {
         if (icon) icon.textContent = sec;
         if (bc) bc.textContent = '';
         btn.className = 'bomb-btn disabled';
-    } else {
+    } else if (bombs >= MAX_BOMBS) {
         if (icon) icon.textContent = '💣';
         if (bc) bc.textContent = bombs;
+        btn.className = 'bomb-btn';
+    } else {
+        // 未达上限且可用：显示「距下次回复的秒数」，让玩家感知 30 秒回复节奏
+        var regenSec = Math.ceil((BOMB_REGEN_FRAMES - bombRegenTimer) / 60);
+        if (icon) icon.textContent = '💣';
+        if (bc) bc.textContent = bombs + ' · ' + regenSec + 's';
         btn.className = 'bomb-btn';
     }
 }
@@ -754,6 +955,14 @@ function update() {
     if (touchActive) { player.x += touchDX; player.y += touchDY; touchDX = 0; touchDY = 0; }
     player.x = Math.max(20, Math.min(canvas.width-20, player.x));
     player.y = Math.max(40, Math.min(canvas.height-30, player.y));
+    // 🔓 突破技辉光跟随玩家
+    if (breakActive > 0) {
+        var aura = document.getElementById('breakAura');
+        if (aura && aura.classList.contains('on')) {
+            aura.style.left = player.x + 'px';
+            aura.style.top = player.y + 'px';
+        }
+    }
     if (invincible > 0) invincible--;
     if (bombCooldown > 0) { bombCooldown--; updateBombButton(); } // 💣 炸弹冷却倒计时
 
@@ -771,6 +980,18 @@ function update() {
         if (laserTick >= 60) { laserTick -= 60; applyLaserHit(); }
     }
     if (laserCooldown > 0) laserCooldown--;
+    // 🔓 突破技：持续时间倒计时 + 移速恢复 + 辉光
+    if (breakActive > 0) {
+        breakActive--;
+        if (breakActive <= 0) {
+            // 结束：恢复基准移速、关闭辉光、清理机翼尾迹
+            player.speed = BREAK_BASE_SPEED;
+            setBreakAura(false);
+            trails = [];
+            flashTip('⚡ 突破技结束');
+        }
+    }
+    if (breakCooldown > 0) breakCooldown--;
     updateSkillButtons();
 
     // ===== 发射逻辑 =====
@@ -804,6 +1025,26 @@ function update() {
 
     if (!bossActive && score >= BOSS_SCORE*(bossDefeatedCount+1) && bossDefeatedCount < 3) spawnBoss();
     if (!bossActive && Math.random() < 0.028) spawnEnemy();
+    // 💖 每 5 秒(300帧)判定一次：10% 概率在上方生成一个爱心道具
+    heartSpawnTimer--;
+    if (heartSpawnTimer <= 0) {
+        heartSpawnTimer = 300; // 5 秒 @60fps
+        if (Math.random() < 0.10) {
+            var hx = 40 + Math.random() * (canvas.width - 80);
+            items.push({ x: hx, y: -20, type: 'heart', w: 24, h: 24, speed: 1.6 });
+        }
+    }
+    // 💣 每 30 秒(1800帧)自动恢复 1 颗炸弹，封顶 MAX_BOMBS（独立计时，不受使用冷却影响）
+    if (bombs < MAX_BOMBS) {
+        bombRegenTimer++;
+        if (bombRegenTimer >= BOMB_REGEN_FRAMES) {
+            bombRegenTimer = 0;
+            bombs++;
+            updateHUD(true); // 立即刷新数量
+        }
+    } else {
+        bombRegenTimer = 0; // 已满，重置计时（下次消耗后重新累计 30 秒）
+    }
 
     // 敌机更新（按类型区分射击）
     enemies.forEach(function(e) {
@@ -855,9 +1096,13 @@ function update() {
     var pHit = { x: player.x-12, y: player.y-20, w: 24, h: 40 };
     items.forEach(function(it) {
         if (collide(it, pHit)) {
-            if (it.type === 'power' && powerLevel < 10) powerLevel++;
+            if (it.type === 'power' && powerLevel < MAX_POWER) {
+                powerLevel++;
+                if (powerLevel === MAX_POWER) flashTip('🔓 火力突破上限 Lv.30！开大必出 50 伤子弹！');
+            }
             else if (it.type === 'shield') shield = true;
-            else if (it.type === 'bomb') bombs = Math.min(bombs+1, 3);
+            else if (it.type === 'bomb') bombs = Math.min(bombs+1, MAX_BOMBS);
+            else if (it.type === 'heart' && lives < MAX_LIVES) { lives++; updateHUD(true); flashTip('💖 +1 生命'); }
             it.y = 9999; playSound('powerup');
             effects.push({ type: it.type, timer: 40, maxTimer: 40, pl: powerLevel });
             updateHUD();
@@ -885,16 +1130,30 @@ function update() {
     warnings.forEach(function(w) { w.timer--; });
     warnings = warnings.filter(function(w) { return w.timer > 0; });
 
-    // 碰撞：玩家子弹（伤害由子弹 damage 决定，普通=10，开大50伤子弹=50）
+    // 🚀 碰撞：空间分区 —— 按 x 坐标分桶，子弹只检测同桶±邻桶的敌机，避免 O(n*m)
+    // 打 Boss 弹幕密集时，原先每帧上千次 collide 是"偶尔卡"的主因，分区后降到几十次
+    var cellW = 60;
+    var buckets = {};
+    enemies.forEach(function(e, ei) {
+        var c = Math.floor((e.x + e.w / 2) / cellW);
+        (buckets[c] = buckets[c] || []).push(ei);
+    });
     var dead = {};
     bullets.forEach(function(b) {
         var dmg = b.damage || 1;
-        enemies.forEach(function(e, ei) {
-            if (collide(b, e)) {
-                b.y = -999; e.hp -= dmg;
-                if (e.hp <= 0) dead[ei] = true;
+        var bc = Math.floor((b.x + (b.w || 3) / 2) / cellW);
+        for (var dc = -1; dc <= 1; dc++) {
+            var arr = buckets[bc + dc];
+            if (!arr) continue;
+            for (var ai = 0; ai < arr.length; ai++) {
+                var e = enemies[arr[ai]];
+                if (!e || dead[arr[ai]]) continue;
+                if (collide(b, e)) {
+                    b.y = -999; e.hp -= dmg;
+                    if (e.hp <= 0) dead[arr[ai]] = true;
+                }
             }
-        });
+        }
         if (bossActive && boss && collide(b, boss)) { b.y = -999; damageBoss(dmg); }
     });
     Object.keys(dead).forEach(function(ei) {
@@ -1052,6 +1311,40 @@ function drawPlayer() {
         ctx.fillStyle = tg3; ctx.beginPath(); ctx.ellipse(9,24,4,thrust*0.5,0,0,Math.PI*2); ctx.fill();
     }
 
+    // ===== 🔓 Lv30「突破上限」：外观全面进化（常态常驻，无需开大）=====
+    if (isBreakthrough()) {
+        var bt2 = Date.now() / 1000;
+        // 外层金色超环（比彩色光环更大，象征突破）
+        ctx.save();
+        ctx.rotate(bt2 * 2.2);
+        var sg = ctx.createLinearGradient(-48, 0, 48, 0);
+        sg.addColorStop(0, 'hsla(' + ((bt2*90)%360) + ',100%,60%,0.9)');
+        sg.addColorStop(0.5, 'hsla(' + ((bt2*90+60)%360) + ',100%,72%,1)');
+        sg.addColorStop(1, 'hsla(' + ((bt2*90+120)%360) + ',100%,60%,0.9)');
+        ctx.strokeStyle = sg; ctx.lineWidth = 3;
+        ctx.setLineDash([14, 8]); ctx.lineDashOffset = -bt2 * 60;
+        ctx.beginPath(); ctx.arc(0, 0, 48, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+        // 金色外发光
+        ctx.globalAlpha = 0.35 + 0.2 * Math.sin(bt2 * 5);
+        ctx.strokeStyle = '#fd4'; ctx.lineWidth = 6;
+        ctx.beginPath(); ctx.arc(0, 0, 48, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+        // 金色全身描边
+        ctx.strokeStyle = '#fd4'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(0,-22); ctx.lineTo(-16,10); ctx.lineTo(-9,14); ctx.lineTo(-9,24); ctx.lineTo(9,24); ctx.lineTo(9,14); ctx.lineTo(16,10); ctx.closePath(); ctx.stroke();
+        // 常驻双加特林（突破后平时就有，开大时仍正常显示）
+        var ws2 = getWingSpan(), rot2 = (Date.now() / 18) % (Math.PI * 2);
+        [-ws2, ws2].forEach(function(gx) {
+            ctx.fillStyle = '#4a3a2a'; ctx.fillRect(gx - 3, 8, 6, 14);
+            ctx.save(); ctx.translate(gx, 22); ctx.rotate(rot2);
+            ctx.fillStyle = '#8a7a6a'; ctx.fillRect(-2, 0, 4, 12);
+            ctx.fillStyle = '#f0c060'; ctx.fillRect(-3, 12, 6, 3);
+            ctx.restore();
+            ctx.fillStyle = '#ffe08a'; ctx.beginPath(); ctx.arc(gx, 22, 3, 0, Math.PI * 2); ctx.fill();
+        });
+    }
+
     // ===== 🔥 开大：机翼下两个加特林（开大期间始终显示，随整机旋转）=====
     if (ultActive > 0) {
         var ws = getWingSpan(), rot = (Date.now() / 18) % (Math.PI * 2);
@@ -1165,14 +1458,25 @@ function drawItem(it) {
     ctx.save(); ctx.translate(it.x, it.y);
     ctx.shadowBlur = 12;
     if (it.type === 'power') {
-        ctx.shadowColor = '#0f0'; ctx.fillStyle = '#0f0';
+        var isMax = (powerLevel >= MAX_POWER - 1);   // 🔓 下一次拾取即达 Lv30 → 紫色突破道具
+        ctx.shadowColor = isMax ? '#f0f' : '#0f0'; ctx.fillStyle = isMax ? '#f0f' : '#0f0';
         ctx.beginPath(); ctx.arc(0,0,9,0,Math.PI*2); ctx.fill();
         ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(-3,-3,3,0,Math.PI*2); ctx.fill();
-        ctx.fillStyle = '#0f0'; ctx.beginPath(); ctx.moveTo(0,5); ctx.lineTo(-4,11); ctx.lineTo(4,11); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = isMax ? '#f0f' : '#0f0'; ctx.beginPath(); ctx.moveTo(0,5); ctx.lineTo(-4,11); ctx.lineTo(4,11); ctx.closePath(); ctx.fill();
+        if (isMax) { ctx.fillStyle = '#fff'; ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center'; ctx.fillText('MAX', 0, 15); }
     } else if (it.type === 'shield') {
         ctx.shadowColor = '#0ff'; ctx.fillStyle = '#0ff';
         ctx.beginPath(); ctx.arc(0,0,11,Math.PI,0); ctx.lineTo(11,6); ctx.lineTo(-11,6); ctx.closePath(); ctx.fill();
         ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(0,2,4,0,Math.PI*2); ctx.fill();
+    } else if (it.type === 'heart') { // 💖 爱心：回 1 滴血
+        ctx.shadowColor = '#f39'; ctx.fillStyle = '#f39';
+        ctx.beginPath();
+        ctx.moveTo(0,6);
+        ctx.bezierCurveTo(-14,-6,-8,-16,0,-8);
+        ctx.bezierCurveTo(8,-16,14,-6,0,6);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center';
+        ctx.fillText('+1', 0, 12);
     } else { // bomb
         ctx.shadowColor = '#f00'; ctx.fillStyle = '#d20';
         ctx.beginPath(); ctx.arc(0,2,10,0,Math.PI*2); ctx.fill();
@@ -1190,7 +1494,9 @@ function drawBoss() {
     ctx.save(); ctx.translate(boss.x+boss.w/2, boss.y+boss.h/2);
     if (boss.kind === 0) {
         // 烈焰战机：恶魔战斗机（不再是单调三角）
-        var g = ctx.createLinearGradient(0,-35,0,35);
+        // 🚀 缓存渐变对象（每帧复用，避免频繁创建触发 GC 卡顿）
+        if (!boss._flameGrad || boss._flameGrad.canvas !== ctx.canvas) boss._flameGrad = ctx.createLinearGradient(0,-35,0,35);
+        var g = boss._flameGrad;
         g.addColorStop(0,'#f90'); g.addColorStop(1,'#900');
         ctx.fillStyle = g;
         ctx.beginPath(); ctx.moveTo(0,-35); ctx.lineTo(-42,30); ctx.lineTo(-15,35); ctx.lineTo(0,20); ctx.lineTo(15,35); ctx.lineTo(42,30); ctx.closePath(); ctx.fill();
@@ -1240,6 +1546,60 @@ function drawBoss() {
         // 双臂炮管
         ctx.fillStyle = '#555'; ctx.fillRect(-44,22,14,20); ctx.fillRect(30,22,14,20);
         ctx.fillStyle = col; ctx.fillRect(-40,40,6,10); ctx.fillRect(34,40,6,10);
+
+        // 🛡️ 防御形态「量子护盾」光环：蓝白色能量球，随剩余值脉动
+        if (boss.energyShield > 0 && boss.energyShieldMax > 0) {
+            var shp = boss.energyShield / boss.energyShieldMax;      // 1→0
+            var shR = 56 + Math.sin(Date.now()/40) * 4;
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            var shg = ctx.createRadialGradient(0, 0, 0, 0, 0, shR);
+            shg.addColorStop(0, 'rgba(180,220,255,' + (0.35 + 0.25 * shp) + ')');
+            shg.addColorStop(0.6, 'rgba(60,140,255,' + (0.5 * shp) + ')');
+            shg.addColorStop(1, 'rgba(0,60,180,0)');
+            ctx.fillStyle = shg; ctx.beginPath(); ctx.arc(0, 0, shR, 0, Math.PI*2); ctx.fill();
+            ctx.strokeStyle = 'rgba(140,200,255,' + (0.6 + 0.4 * Math.sin(Date.now()/50)) + ')';
+            ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.arc(0, 0, shR, 0, Math.PI*2); ctx.stroke();
+            // 护盾值条
+            ctx.fillStyle = 'rgba(120,200,255,0.9)';
+            ctx.fillRect(-46, -52, 92 * shp, 4);
+            ctx.restore();
+        }
+
+        // 💥 毁灭形态「末日新星Ⅱ」蓄力特效：反应炉黑红超频 + 逆向旋转能量漩涡
+        if (boss.nova2Charge > 0) {
+            var prog = 1 - boss.nova2Charge / 150;                  // 0→1
+            var pulse2 = 0.5 + 0.5 * Math.sin(Date.now() / 22);
+            var radius2 = 30 + prog * 90;
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            // 外扩暗红光环
+            ctx.strokeStyle = 'rgba(255,' + Math.floor(30 + (1-prog) * 60) + ',0,' + (0.9 - prog * 0.35) + ')';
+            ctx.lineWidth = 5 + pulse2 * 6;
+            ctx.beginPath(); ctx.arc(0, 0, radius2, 0, Math.PI*2); ctx.stroke();
+            // 逆向旋转能量漩涡（双螺旋）
+            for (var sw = 0; sw < 2; sw++) {
+                ctx.rotate(prog * 6 + sw * Math.PI);
+                ctx.strokeStyle = 'rgba(255,' + Math.floor(60 + prog * 120) + ',20,' + (0.5 + prog * 0.4) + ')';
+                ctx.lineWidth = 2 + prog * 3;
+                ctx.beginPath();
+                for (var st = 0; st < 60; st++) {
+                    var sa = (st / 60) * Math.PI * 4;
+                    var sr = (st / 60) * radius2;
+                    var sx = Math.cos(sa) * sr, sy = Math.sin(sa) * sr;
+                    st === 0 ? ctx.moveTo(sx, sy) : ctx.lineTo(sx, sy);
+                }
+                ctx.stroke();
+            }
+            // 反应炉白热化
+            var n2g = ctx.createRadialGradient(0, 0, 0, 0, 0, 24 + prog * 24);
+            n2g.addColorStop(0, 'rgba(255,255,255,' + (0.5 + prog * 0.5) + ')');
+            n2g.addColorStop(0.4, 'rgba(255,60,0,' + (0.4 + prog * 0.5) + ')');
+            n2g.addColorStop(1, 'rgba(80,0,0,0)');
+            ctx.fillStyle = n2g; ctx.beginPath(); ctx.arc(0, 0, 24 + prog * 24, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
 
         // 🌟 末日新星蓄力特效：反应炉超频脉动 + 扩张能量环 + 危险红光
         if (boss.novaCharge > 0) {
@@ -1294,6 +1654,40 @@ function draw() {
             ctx.globalAlpha = 1;
             return;
         }
+        // 💥 毁灭形态「末日新星Ⅱ」膨胀特效：黑红吞噬 + 余烬环
+        if (ef.kind === 'nova2Boom') {
+            var np = 1 - ef.timer/ef.maxTimer;               // 0→1
+            var nr = 20 + np * 420;                          // 半径从 20 扩张到铺满屏幕
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            var nvg = ctx.createRadialGradient(ef.x, ef.y, 0, ef.x, ef.y, nr);
+            nvg.addColorStop(0, 'rgba(255,240,200,' + (1 - np) * 0.9 + ')');
+            nvg.addColorStop(0.35, 'rgba(255,120,20,' + (1 - np) * 0.7 + ')');
+            nvg.addColorStop(0.7, 'rgba(120,0,0,' + (1 - np) * 0.5 + ')');
+            nvg.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = nvg; ctx.beginPath(); ctx.arc(ef.x, ef.y, nr, 0, Math.PI*2); ctx.fill();
+            // 旋转余烬环
+            ctx.rotate(np * 4);
+            ctx.strokeStyle = 'rgba(255,180,60,' + (1 - np) + ')';
+            ctx.lineWidth = 3 + (1 - np) * 6;
+            ctx.beginPath(); ctx.arc(ef.x, ef.y, nr * 0.72, 0, Math.PI*2); ctx.stroke();
+            ctx.restore();
+            ctx.globalAlpha = 1;
+            return;
+        }
+        // 🛡️ 护盾展开/破碎特效
+        if (ef.kind === 'shieldExpand' || ef.kind === 'shieldBreak') {
+            var sp = 1 - ef.timer/ef.maxTimer;
+            var sr = (ef.kind === 'shieldBreak' ? 60 + sp * 200 : ef.r + sp * 260);
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            ctx.strokeStyle = ef.kind === 'shieldBreak' ? 'rgba(255,80,40,' + (1 - sp) + ')' : 'rgba(80,180,255,' + (1 - sp) + ')';
+            ctx.lineWidth = 4 + (1 - sp) * 8;
+            ctx.beginPath(); ctx.arc(ef.x, ef.y, sr, 0, Math.PI*2); ctx.stroke();
+            ctx.restore();
+            ctx.globalAlpha = 1;
+            return;
+        }
         var p = 1 - ef.timer/ef.maxTimer; ctx.globalAlpha = 1 - p;
         if (ef.type === 'power') { ctx.fillStyle = ef.pl>5?'#ff0':'#0f0'; ctx.font = 'bold 16px monospace'; ctx.fillText(ef.pl>5?'SPEED UP':'+FIRE', ef.x-25, ef.y-p*30); }
         else if (ef.type === 'shield') { ctx.strokeStyle = '#0ff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(ef.x, ef.y, p*40, 0, Math.PI*2); ctx.stroke(); }
@@ -1318,7 +1712,23 @@ function draw() {
     });
     ctx.globalAlpha = 1;
     bullets.forEach(drawBullet);
-    enemyBullets.forEach(function(b) { ctx.fillStyle = b.laser?'#fff':(b.homing?'#fa0':'#f0f'); ctx.fillRect(b.x, b.y, b.w, b.h); });
+    enemyBullets.forEach(function(b) {
+        if (b.shield) {                                          // 🛡️ 护盾反击弹幕：蓝白高亮
+            ctx.fillStyle = '#9df';
+            ctx.beginPath(); ctx.arc(b.x+b.w/2, b.y+b.h/2, b.w*0.8, 0, Math.PI*2); ctx.fill();
+            return;
+        }
+        if (b.heavy) {                                            // 💥 nova2 毁灭弹幕：橙红辉光
+            ctx.save();
+            ctx.shadowColor = '#f60'; ctx.shadowBlur = 8;
+            ctx.fillStyle = '#f80';
+            ctx.beginPath(); ctx.arc(b.x+b.w/2, b.y+b.h/2, b.w*0.7, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+            return;
+        }
+        ctx.fillStyle = b.laser ? '#fff' : (b.homing ? '#fa0' : '#f0f');
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+    });
     enemies.forEach(drawEnemy);
     drawBoss();
 }
@@ -1377,10 +1787,28 @@ function bindAll() {
     if (sb) sb.addEventListener('touchstart', function(ev) { ev.preventDefault(); ev.stopPropagation(); activateSpin(); }, { passive: false });
     var lb = bind('laserBtn', activateLaser);
     if (lb) lb.addEventListener('touchstart', function(ev) { ev.preventDefault(); ev.stopPropagation(); activateLaser(); }, { passive: false });
+    // 🔓 突破技按钮（Lv30）：R 键 / 点击 / 触摸 三绑
+    var brb = bind('breakBtn', activateBreak);
+    if (brb) brb.addEventListener('touchstart', function(ev) { ev.preventDefault(); ev.stopPropagation(); activateBreak(); }, { passive: false });
+    // 🔓 突破技激活期间：机身环绕辉光（跟随玩家位置），提供「移速×2 + 开大」的视觉反馈
+    setBreakAura(breakActive > 0);
     bind('startScreen', function(ev) {
         if (ev.target && ev.target.id === 'startBtn') return;
         startGame();
     });
+}
+
+// 🔓 突破技激活期间：机身环绕辉光（跟随玩家位置），提供「移速×2 + 开大」的视觉反馈
+function setBreakAura(on) {
+    var aura = document.getElementById('breakAura');
+    if (!aura) return;
+    if (on) {
+        aura.classList.add('on');
+        aura.style.left = player.x + 'px';
+        aura.style.top = player.y + 'px';
+    } else {
+        aura.classList.remove('on');
+    }
 }
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', bindAll);
